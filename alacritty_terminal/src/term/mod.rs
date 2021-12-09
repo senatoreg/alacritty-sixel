@@ -1816,8 +1816,7 @@ impl<T: EventListener> Handler for Term<T> {
             self.event_proxy.send_event(Event::PtyWrite(text));
         }
 
-        let trailer_text = format!("S");
-        self.event_proxy.send_event(Event::PtyWrite(trailer_text));
+        self.event_proxy.send_event(Event::PtyWrite("S".to_string()));
     }
 
     fn start_sixel_graphic(&mut self, params: &Params) -> Option<Box<sixel::Parser>> {
