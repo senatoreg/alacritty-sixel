@@ -542,7 +542,7 @@ impl Display {
                     lines.update(&cell);
 
                     // Track any graphic present in the cell.
-                    graphics_list.update(&cell);
+                    graphics_list.update(&cell, &size_info);
 
                     // Draw the cell.
                     api.render_cell(cell, glyph_cache);
