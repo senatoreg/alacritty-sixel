@@ -27,6 +27,7 @@ dependencies = [
  "glutin",
  "libc",
  "log",
+ "memoffset",
  "notify",
  "objc",
  "parking_lot",
