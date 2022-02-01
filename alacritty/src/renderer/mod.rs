@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::fmt::{self, Display, Formatter};
 use std::hash::BuildHasherDefault;
 use std::mem::size_of;
-use std::{io, ptr};
+use std::{fmt, ptr};
 
 use bitflags::bitflags;
 use crossfont::{
@@ -26,10 +25,19 @@ use crate::gl;
 use crate::gl::types::*;
 use crate::renderer::graphics::GraphicsRenderer;
 use crate::renderer::rects::{RectRenderer, RenderRect};
+use crate::renderer::shader::{ShaderError, ShaderProgram};
 
 pub mod builtin_font;
 pub mod graphics;
 pub mod rects;
+mod shader;
+
+macro_rules! cstr {
+    ($s:literal) => {
+        // This can be optimized into an no-op with pre-allocated NUL-terminated bytes.
+        unsafe { std::ffi::CStr::from_ptr(concat!($s, "\0").as_ptr().cast()) }
+    };
+}
 
 // Shader source.
 static TEXT_SHADER_F: &str = include_str!("../../res/text.f.glsl");
@@ -48,30 +56,31 @@ pub trait LoadGlyph {
 
 #[derive(Debug)]
 pub enum Error {
-    ShaderCreation(ShaderCreationError),
+    /// Shader error.
+    Shader(ShaderError),
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::ShaderCreation(err) => err.source(),
+            Error::Shader(err) => err.source(),
         }
     }
 }
 
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::ShaderCreation(err) => {
+            Error::Shader(err) => {
                 write!(f, "There was an error initializing the shaders: {}", err)
             },
         }
     }
 }
 
-impl From<ShaderCreationError> for Error {
-    fn from(val: ShaderCreationError) -> Self {
-        Error::ShaderCreation(val)
+impl From<ShaderError> for Error {
+    fn from(val: ShaderError) -> Self {
+        Error::Shader(val)
     }
 }
 
@@ -80,8 +89,8 @@ impl From<ShaderCreationError> for Error {
 /// Uniforms are prefixed with "u", and vertex attributes are prefixed with "a".
 #[derive(Debug)]
 pub struct TextShaderProgram {
-    /// Program id.
-    id: GLuint,
+    /// Shader program.
+    program: ShaderProgram,
 
     /// Projection scale and offset uniform.
     u_projection: GLint,
@@ -135,11 +144,17 @@ pub struct GlyphCache {
     /// Font size.
     font_size: crossfont::Size,
 
+    /// Font offset.
+    font_offset: Delta<i8>,
+
     /// Glyph offset.
     glyph_offset: Delta<i8>,
 
     /// Font metrics.
     metrics: crossfont::Metrics,
+
+    /// Whether to use the built-in font for box drawing characters.
+    builtin_box_drawing: bool,
 }
 
 impl GlyphCache {
@@ -168,8 +183,10 @@ impl GlyphCache {
             bold_key: bold,
             italic_key: italic,
             bold_italic_key: bold_italic,
+            font_offset: font.offset,
             glyph_offset: font.glyph_offset,
             metrics,
+            builtin_box_drawing: font.builtin_box_drawing,
         };
 
         cache.load_common_glyphs(loader);
@@ -271,7 +288,17 @@ impl GlyphCache {
 
         // Rasterize the glyph using the built-in font for special characters or the user's font
         // for everything else.
-        let rasterized = builtin_font::builtin_glyph(glyph_key.character, &self.metrics)
+        let rasterized = self
+            .builtin_box_drawing
+            .then(|| {
+                builtin_font::builtin_glyph(
+                    glyph_key.character,
+                    &self.metrics,
+                    &self.font_offset,
+                    &self.glyph_offset,
+                )
+            })
+            .flatten()
             .map_or_else(|| self.rasterizer.get_glyph(glyph_key), Ok);
 
         let glyph = match rasterized {
@@ -338,6 +365,7 @@ impl GlyphCache {
     ) -> Result<(), crossfont::Error> {
         // Update dpi scaling.
         self.rasterizer.update_dpr(dpr as f32);
+        self.font_offset = font.offset;
 
         // Recompute font keys.
         let (regular, bold, italic, bold_italic) =
@@ -358,6 +386,7 @@ impl GlyphCache {
         self.italic_key = italic;
         self.bold_italic_key = bold_italic;
         self.metrics = metrics;
+        self.builtin_box_drawing = font.builtin_box_drawing;
 
         self.clear_glyph_cache(loader);
 
@@ -705,7 +734,7 @@ impl QuadRenderer {
         F: FnOnce(RenderApi<'_>) -> T,
     {
         unsafe {
-            gl::UseProgram(self.program.id);
+            gl::UseProgram(self.program.id());
             self.program.set_term_uniforms(props);
 
             gl::BindVertexArray(self.vao);
@@ -754,7 +783,7 @@ impl QuadRenderer {
             self.set_viewport(size);
 
             // Update projection.
-            gl::UseProgram(self.program.id);
+            gl::UseProgram(self.program.id());
             self.program.update_projection(
                 size.width(),
                 size.height(),
@@ -1003,56 +1032,18 @@ impl<'a> Drop for RenderApi<'a> {
 }
 
 impl TextShaderProgram {
-    pub fn new() -> Result<TextShaderProgram, ShaderCreationError> {
-        let vertex_shader = create_shader(gl::VERTEX_SHADER, TEXT_SHADER_V)?;
-        let fragment_shader = create_shader(gl::FRAGMENT_SHADER, TEXT_SHADER_F)?;
-        let program = create_program(vertex_shader, fragment_shader)?;
+    pub fn new() -> Result<TextShaderProgram, Error> {
+        let program = ShaderProgram::new(TEXT_SHADER_V, TEXT_SHADER_F)?;
+        Ok(Self {
+            u_projection: program.get_uniform_location(cstr!("projection"))?,
+            u_cell_dim: program.get_uniform_location(cstr!("cellDim"))?,
+            u_background: program.get_uniform_location(cstr!("backgroundPass"))?,
+            program,
+        })
+    }
 
-        unsafe {
-            gl::DeleteShader(fragment_shader);
-            gl::DeleteShader(vertex_shader);
-            gl::UseProgram(program);
-        }
-
-        macro_rules! cptr {
-            ($thing:expr) => {
-                $thing.as_ptr() as *const _
-            };
-        }
-
-        macro_rules! assert_uniform_valid {
-            ($uniform:expr) => {
-                assert!($uniform != gl::INVALID_VALUE as i32);
-                assert!($uniform != gl::INVALID_OPERATION as i32);
-            };
-            ( $( $uniform:expr ),* ) => {
-                $( assert_uniform_valid!($uniform); )*
-            };
-        }
-
-        // get uniform locations
-        let (projection, cell_dim, background) = unsafe {
-            (
-                gl::GetUniformLocation(program, cptr!(b"projection\0")),
-                gl::GetUniformLocation(program, cptr!(b"cellDim\0")),
-                gl::GetUniformLocation(program, cptr!(b"backgroundPass\0")),
-            )
-        };
-
-        assert_uniform_valid!(projection, cell_dim, background);
-
-        let shader = Self {
-            id: program,
-            u_projection: projection,
-            u_cell_dim: cell_dim,
-            u_background: background,
-        };
-
-        unsafe {
-            gl::UseProgram(0);
-        }
-
-        Ok(shader)
+    fn id(&self) -> GLuint {
+        self.program.id()
     }
 
     fn update_projection(&self, width: f32, height: f32, padding_x: f32, padding_y: f32) {
@@ -1086,147 +1077,6 @@ impl TextShaderProgram {
         unsafe {
             gl::Uniform1i(self.u_background, value);
         }
-    }
-}
-
-impl Drop for TextShaderProgram {
-    fn drop(&mut self) {
-        unsafe {
-            gl::DeleteProgram(self.id);
-        }
-    }
-}
-
-pub fn create_program(vertex: GLuint, fragment: GLuint) -> Result<GLuint, ShaderCreationError> {
-    unsafe {
-        let program = gl::CreateProgram();
-        gl::AttachShader(program, vertex);
-        gl::AttachShader(program, fragment);
-        gl::LinkProgram(program);
-
-        let mut success: GLint = 0;
-        gl::GetProgramiv(program, gl::LINK_STATUS, &mut success);
-
-        if success == i32::from(gl::TRUE) {
-            Ok(program)
-        } else {
-            Err(ShaderCreationError::Link(get_program_info_log(program)))
-        }
-    }
-}
-
-pub fn create_shader(kind: GLenum, source: &'static str) -> Result<GLuint, ShaderCreationError> {
-    let len: [GLint; 1] = [source.len() as GLint];
-
-    let shader = unsafe {
-        let shader = gl::CreateShader(kind);
-        gl::ShaderSource(shader, 1, &(source.as_ptr() as *const _), len.as_ptr());
-        gl::CompileShader(shader);
-        shader
-    };
-
-    let mut success: GLint = 0;
-    unsafe {
-        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut success);
-    }
-
-    if success == GLint::from(gl::TRUE) {
-        Ok(shader)
-    } else {
-        // Read log.
-        let log = get_shader_info_log(shader);
-
-        // Cleanup.
-        unsafe {
-            gl::DeleteShader(shader);
-        }
-
-        Err(ShaderCreationError::Compile(log))
-    }
-}
-
-fn get_program_info_log(program: GLuint) -> String {
-    // Get expected log length.
-    let mut max_length: GLint = 0;
-    unsafe {
-        gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut max_length);
-    }
-
-    // Read the info log.
-    let mut actual_length: GLint = 0;
-    let mut buf: Vec<u8> = Vec::with_capacity(max_length as usize);
-    unsafe {
-        gl::GetProgramInfoLog(program, max_length, &mut actual_length, buf.as_mut_ptr() as *mut _);
-    }
-
-    // Build a string.
-    unsafe {
-        buf.set_len(actual_length as usize);
-    }
-
-    // XXX should we expect OpenGL to return garbage?
-    String::from_utf8(buf).unwrap()
-}
-
-fn get_shader_info_log(shader: GLuint) -> String {
-    // Get expected log length.
-    let mut max_length: GLint = 0;
-    unsafe {
-        gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut max_length);
-    }
-
-    // Read the info log.
-    let mut actual_length: GLint = 0;
-    let mut buf: Vec<u8> = Vec::with_capacity(max_length as usize);
-    unsafe {
-        gl::GetShaderInfoLog(shader, max_length, &mut actual_length, buf.as_mut_ptr() as *mut _);
-    }
-
-    // Build a string.
-    unsafe {
-        buf.set_len(actual_length as usize);
-    }
-
-    // XXX should we expect OpenGL to return garbage?
-    String::from_utf8(buf).unwrap()
-}
-
-#[derive(Debug)]
-pub enum ShaderCreationError {
-    /// Error reading file.
-    Io(io::Error),
-
-    /// Error compiling shader.
-    Compile(String),
-
-    /// Problem linking.
-    Link(String),
-}
-
-impl std::error::Error for ShaderCreationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ShaderCreationError::Io(err) => err.source(),
-            _ => None,
-        }
-    }
-}
-
-impl Display for ShaderCreationError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            ShaderCreationError::Io(err) => write!(f, "Unable to read shader: {}", err),
-            ShaderCreationError::Compile(log) => {
-                write!(f, "Failed compiling shader: {}", log)
-            },
-            ShaderCreationError::Link(log) => write!(f, "Failed linking shader: {}", log),
-        }
-    }
-}
-
-impl From<io::Error> for ShaderCreationError {
-    fn from(val: io::Error) -> Self {
-        ShaderCreationError::Io(val)
     }
 }
 

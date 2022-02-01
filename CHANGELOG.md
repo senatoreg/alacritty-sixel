@@ -11,15 +11,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Minimum Rust version has been bumped to 1.56.0
 
+### Added
+
+ - Option `font.builtin_box_drawing` to disable the built-in font for drawing box characters
+
 ### Changed
 
 - The `--help` output was reworked with a new colorful syntax
+- Builtin font thickness is now based on cell width instead of underline thickness
 
 ### Fixed
 
 - OSC 4 not handling `?`
 - `?` in OSC strings reporting default colors instead of modified ones
 - OSC 104 not clearing colors when second parameter is empty
+- Builtin font lines not contiguous when `font.offset` is used
+- `font.glyph_offset` is no longer applied on builtin font
+- Buili-in font arcs alignment
 
 ## 0.10.0
 
