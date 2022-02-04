@@ -110,7 +110,7 @@ impl RenderList {
             gl::BindBuffer(gl::ARRAY_BUFFER, renderer.program.vbo);
             gl::BindVertexArray(renderer.program.vao);
 
-            gl::UseProgram(renderer.program.id);
+            gl::UseProgram(renderer.program.id());
 
             gl::Uniform2f(
                 renderer.program.u_cell_dimensions,
