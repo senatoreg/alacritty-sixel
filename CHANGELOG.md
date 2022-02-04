@@ -13,7 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
- - Option `font.builtin_box_drawing` to disable the built-in font for drawing box characters
+- Option `font.builtin_box_drawing` to disable the built-in font for drawing box characters
+- Track and report surface damage information to Wayland compositors
 
 ### Changed
 
@@ -28,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Builtin font lines not contiguous when `font.offset` is used
 - `font.glyph_offset` is no longer applied on builtin font
 - Buili-in font arcs alignment
+- Repeated permission prompts on M1 macs
 
 ## 0.10.0
 
