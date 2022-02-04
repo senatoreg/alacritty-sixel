@@ -9,6 +9,7 @@ use crate::renderer;
 /// If the file `graphics.f.glsl` is modified, this value has to be updated.
 pub(super) const TEXTURES_ARRAY_SIZE: usize = 16;
 
+
 /// Sides where the vertex is located.
 ///
 /// * Bit 0 (LSB) is 0 for top and 1 for bottom.
@@ -63,8 +64,8 @@ static GRAPHICS_SHADER_V: &str = include_str!("../../../res/graphics.v.glsl");
 /// Graphics rendering program.
 #[derive(Debug)]
 pub struct GraphicsShaderProgram {
-    /// Program id.
-    pub id: GLuint,
+    /// Shader program
+    program: renderer::ShaderProgram,
 
     /// Uniform of the cell dimensions.
     pub u_cell_dimensions: GLint,
@@ -83,27 +84,20 @@ pub struct GraphicsShaderProgram {
 }
 
 impl GraphicsShaderProgram {
-    pub fn new() -> Result<Self, renderer::ShaderCreationError> {
-        let vertex_shader = renderer::create_shader(gl::VERTEX_SHADER, GRAPHICS_SHADER_V)?;
-        let fragment_shader = renderer::create_shader(gl::FRAGMENT_SHADER, GRAPHICS_SHADER_F)?;
-        let program = renderer::create_program(vertex_shader, fragment_shader)?;
+    pub fn new() -> Result<Self, renderer::Error> {
+        let program = renderer::ShaderProgram::new(GRAPHICS_SHADER_V, GRAPHICS_SHADER_F)?;
 
         let u_cell_dimensions;
         let u_view_dimensions;
         let u_textures;
 
-        unsafe {
-            gl::DeleteShader(fragment_shader);
-            gl::DeleteShader(vertex_shader);
-
-            gl::UseProgram(program);
-
+         unsafe {
             // Uniform locations.
 
             macro_rules! uniform {
                 ($name:literal) => {
                     gl::GetUniformLocation(
-                        program,
+                        program.id(),
                         concat!($name, "\0").as_bytes().as_ptr().cast(),
                     )
                 };
@@ -111,7 +105,7 @@ impl GraphicsShaderProgram {
                 ($fmt:literal, $($arg:tt)+) => {
                     match format!(concat!($fmt, "\0"), $($arg)+) {
                         name => gl::GetUniformLocation(
-                            program,
+                            program.id(),
                             name.as_bytes().as_ptr().cast(),
                         )
                     }
@@ -122,16 +116,18 @@ impl GraphicsShaderProgram {
             u_view_dimensions = uniform!("viewDimensions");
             u_textures =
                 (0..TEXTURES_ARRAY_SIZE).map(|unit| uniform!("textures[{}]", unit)).collect();
-
-            gl::UseProgram(0);
         }
 
         let (vao, vbo) = define_vertex_attributes();
 
         let shader =
-            Self { id: program, u_cell_dimensions, u_view_dimensions, u_textures, vao, vbo };
+            Self { program, u_cell_dimensions, u_view_dimensions, u_textures, vao, vbo };
 
         Ok(shader)
+    }
+
+    pub fn id(&self) -> GLuint {
+        self.program.id()
     }
 }
 
