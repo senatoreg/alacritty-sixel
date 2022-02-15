@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Option `font.builtin_box_drawing` to disable the built-in font for drawing box characters
 - Track and report surface damage information to Wayland compositors
+- Escape sequence for undercurl (`CSI 4 : 3 m`)
 
 ### Changed
 
@@ -30,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `font.glyph_offset` is no longer applied on builtin font
 - Buili-in font arcs alignment
 - Repeated permission prompts on M1 macs
+- Colors being slightly off when using `colors.transparent_background_colors`
 
 ## 0.10.0
 

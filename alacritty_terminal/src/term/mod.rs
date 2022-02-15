@@ -1638,6 +1638,12 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn set_color(&mut self, index: usize, color: Rgb) {
         trace!("Setting color[{}] = {:?}", index, color);
+
+        // Damage terminal if the color changed and it's not the cursor.
+        if index != NamedColor::Cursor as usize && self.colors[index] != Some(color) {
+            self.mark_fully_damaged();
+        }
+
         self.colors[index] = Some(color);
     }
 
@@ -1662,6 +1668,12 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn reset_color(&mut self, index: usize) {
         trace!("Resetting color[{}]", index);
+
+        // Damage terminal if the color changed and it's not the cursor.
+        if index != NamedColor::Cursor as usize && self.colors[index].is_some() {
+            self.mark_fully_damaged();
+        }
+
         self.colors[index] = None;
     }
 
@@ -1844,16 +1856,18 @@ impl<T: EventListener> Handler for Term<T> {
             Attr::Italic => cursor.template.flags.insert(Flags::ITALIC),
             Attr::CancelItalic => cursor.template.flags.remove(Flags::ITALIC),
             Attr::Underline => {
-                cursor.template.flags.remove(Flags::DOUBLE_UNDERLINE);
+                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
                 cursor.template.flags.insert(Flags::UNDERLINE);
             },
             Attr::DoubleUnderline => {
-                cursor.template.flags.remove(Flags::UNDERLINE);
+                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
                 cursor.template.flags.insert(Flags::DOUBLE_UNDERLINE);
             },
-            Attr::CancelUnderline => {
-                cursor.template.flags.remove(Flags::UNDERLINE | Flags::DOUBLE_UNDERLINE);
+            Attr::Undercurl => {
+                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
+                cursor.template.flags.insert(Flags::UNDERCURL);
             },
+            Attr::CancelUnderline => cursor.template.flags.remove(Flags::ALL_UNDERLINES),
             Attr::Hidden => cursor.template.flags.insert(Flags::HIDDEN),
             Attr::CancelHidden => cursor.template.flags.remove(Flags::HIDDEN),
             Attr::Strike => cursor.template.flags.insert(Flags::STRIKEOUT),
@@ -3138,6 +3152,23 @@ mod tests {
         // Just setting `Insert` mode shouldn't mark terminal as damaged.
         assert!(!term.damage.is_fully_damaged);
         term.reset_damage();
+
+        let color_index = 257;
+        term.set_color(color_index, Rgb::default());
+        assert!(term.damage.is_fully_damaged);
+        term.reset_damage();
+
+        // Setting the same color once again shouldn't trigger full damage.
+        term.set_color(color_index, Rgb::default());
+        assert!(!term.damage.is_fully_damaged);
+
+        term.reset_color(color_index);
+        assert!(term.damage.is_fully_damaged);
+        term.reset_damage();
+
+        // We shouldn't trigger fully damage when cursor gets update.
+        term.set_color(NamedColor::Cursor as usize, Rgb::default());
+        assert!(!term.damage.is_fully_damaged);
 
         // However requesting terminal damage should mark terminal as fully damaged in `Insert`
         // mode.
