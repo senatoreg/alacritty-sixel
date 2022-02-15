@@ -27,7 +27,11 @@ bitflags! {
         const DOUBLE_UNDERLINE          = 0b0000_1000_0000_0000;
         const GRAPHICS                  = 0b0001_0000_0000_0000;
         const UNDERCURL                 = 0b0001_0000_0000_0000;
-        const ALL_UNDERLINES            = Self::UNDERLINE.bits | Self::DOUBLE_UNDERLINE.bits | Self::UNDERCURL.bits;
+        const DOTTED_UNDERLINE          = 0b0010_0000_0000_0000;
+        const DASHED_UNDERLINE          = 0b0100_0000_0000_0000;
+        const ALL_UNDERLINES            = Self::UNDERLINE.bits | Self::DOUBLE_UNDERLINE.bits
+                                        | Self::UNDERCURL.bits | Self::DOTTED_UNDERLINE.bits
+                                        | Self::DASHED_UNDERLINE.bits;
     }
 }
 
@@ -139,9 +143,7 @@ impl GridCell for Cell {
             && self.fg == Color::Named(NamedColor::Foreground)
             && !self.flags.intersects(
                 Flags::INVERSE
-                    | Flags::UNDERLINE
-                    | Flags::DOUBLE_UNDERLINE
-                    | Flags::UNDERCURL
+                    | Flags::ALL_UNDERLINES
                     | Flags::STRIKEOUT
                     | Flags::WRAPLINE
                     | Flags::WIDE_CHAR_SPACER
