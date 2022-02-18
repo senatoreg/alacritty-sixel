@@ -159,14 +159,7 @@ pub struct GlyphCache {
 }
 
 impl GlyphCache {
-    pub fn new<L>(
-        mut rasterizer: Rasterizer,
-        font: &Font,
-        loader: &mut L,
-    ) -> Result<GlyphCache, crossfont::Error>
-    where
-        L: LoadGlyph,
-    {
+    pub fn new(mut rasterizer: Rasterizer, font: &Font) -> Result<GlyphCache, crossfont::Error> {
         let (regular, bold, italic, bold_italic) = Self::compute_font_keys(font, &mut rasterizer)?;
 
         // Need to load at least one glyph for the face before calling metrics.
@@ -176,7 +169,7 @@ impl GlyphCache {
 
         let metrics = rasterizer.metrics(regular, font.size())?;
 
-        let mut cache = Self {
+        Ok(Self {
             cache: HashMap::default(),
             rasterizer,
             font_size: font.size(),
@@ -188,11 +181,7 @@ impl GlyphCache {
             glyph_offset: font.glyph_offset,
             metrics,
             builtin_box_drawing: font.builtin_box_drawing,
-        };
-
-        cache.load_common_glyphs(loader);
-
-        Ok(cache)
+        })
     }
 
     fn load_glyphs_for_font<L: LoadGlyph>(&mut self, font: FontKey, loader: &mut L) {
@@ -361,11 +350,11 @@ impl GlyphCache {
     pub fn update_font_size<L: LoadGlyph>(
         &mut self,
         font: &Font,
-        dpr: f64,
+        scale_factor: f64,
         loader: &mut L,
     ) -> Result<(), crossfont::Error> {
         // Update dpi scaling.
-        self.rasterizer.update_dpr(dpr as f32);
+        self.rasterizer.update_dpr(scale_factor as f32);
         self.font_offset = font.offset;
 
         // Recompute font keys.
@@ -379,7 +368,7 @@ impl GlyphCache {
         })?;
         let metrics = self.rasterizer.metrics(regular, font.size())?;
 
-        info!("Font size changed to {:?} with DPR of {}", font.size(), dpr);
+        info!("Font size changed to {:?} with scale factor of {}", font.size(), scale_factor);
 
         self.font_size = font.size();
         self.font_key = regular;
@@ -399,21 +388,11 @@ impl GlyphCache {
     }
 
     /// Prefetch glyphs that are almost guaranteed to be loaded anyways.
-    fn load_common_glyphs<L: LoadGlyph>(&mut self, loader: &mut L) {
+    pub fn load_common_glyphs<L: LoadGlyph>(&mut self, loader: &mut L) {
         self.load_glyphs_for_font(self.font_key, loader);
         self.load_glyphs_for_font(self.bold_key, loader);
         self.load_glyphs_for_font(self.italic_key, loader);
         self.load_glyphs_for_font(self.bold_italic_key, loader);
-    }
-
-    /// Calculate font metrics without access to a glyph cache.
-    pub fn static_metrics(font: Font, dpr: f64) -> Result<crossfont::Metrics, crossfont::Error> {
-        let mut rasterizer = crossfont::Rasterizer::new(dpr as f32, font.use_thin_strokes)?;
-        let regular_desc = GlyphCache::make_desc(font.normal(), Slant::Normal, Weight::Normal);
-        let regular = Self::load_regular_font(&mut rasterizer, &regular_desc, font.size())?;
-        rasterizer.get_glyph(GlyphKey { font_key: regular, character: 'm', size: font.size() })?;
-
-        rasterizer.metrics(regular, font.size())
     }
 }
 
