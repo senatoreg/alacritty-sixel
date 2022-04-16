@@ -3,6 +3,7 @@ use std::mem;
 use crate::gl;
 use crate::gl::types::*;
 use crate::renderer;
+use crate::renderer::shader::{ShaderVersion, ShaderProgram};
 
 /// Number of elements of the `textures[]` uniform.
 ///
@@ -65,7 +66,7 @@ static GRAPHICS_SHADER_V: &str = include_str!("../../../res/graphics.v.glsl");
 #[derive(Debug)]
 pub struct GraphicsShaderProgram {
     /// Shader program
-    program: renderer::ShaderProgram,
+    program: ShaderProgram,
 
     /// Uniform of the cell dimensions.
     pub u_cell_dimensions: GLint,
@@ -84,8 +85,10 @@ pub struct GraphicsShaderProgram {
 }
 
 impl GraphicsShaderProgram {
-    pub fn new() -> Result<Self, renderer::Error> {
-        let program = renderer::ShaderProgram::new(GRAPHICS_SHADER_V, GRAPHICS_SHADER_F)?;
+    pub fn new(shader_version: ShaderVersion) -> Result<Self, renderer::Error> {
+        // FIXME: GLSL3 is forced. graphics shader must support GLES2 and use shader_version.
+        let _ = shader_version;
+        let program = ShaderProgram::new(ShaderVersion::Glsl3, GRAPHICS_SHADER_V, GRAPHICS_SHADER_F)?;
 
         let u_cell_dimensions;
         let u_view_dimensions;

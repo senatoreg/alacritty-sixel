@@ -16,6 +16,7 @@ use glutin::window::CursorIcon;
 use glutin::Rect as DamageRect;
 use log::{debug, info};
 use parking_lot::MutexGuard;
+use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthChar;
 #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
 use wayland_client::EventQueue;
@@ -24,15 +25,13 @@ use crossfont::{self, Rasterize, Rasterizer};
 
 use alacritty_terminal::ansi::NamedColor;
 use alacritty_terminal::config::MAX_SCROLLBACK_LINES;
-use alacritty_terminal::event::{EventListener, OnResize};
-use alacritty_terminal::grid::Dimensions as _;
+use alacritty_terminal::event::{EventListener, OnResize, WindowSize};
+use alacritty_terminal::grid::Dimensions as TermDimensions;
 use alacritty_terminal::index::{Column, Direction, Line, Point};
 use alacritty_terminal::selection::{Selection, SelectionRange};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::{
-    SizeInfo, Term, TermDamage, TermMode, MIN_COLUMNS, MIN_SCREEN_LINES,
-};
+use alacritty_terminal::term::{Term, TermDamage, TermMode, MIN_COLUMNS, MIN_SCREEN_LINES};
 
 use crate::config::font::Font;
 #[cfg(not(windows))]
@@ -50,7 +49,7 @@ use crate::display::window::Window;
 use crate::event::{Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
 use crate::renderer::rects::{RenderLines, RenderRect};
-use crate::renderer::{self, GlyphCache, QuadRenderer};
+use crate::renderer::{self, GlyphCache, Renderer};
 
 pub mod content;
 pub mod cursor;
@@ -135,6 +134,166 @@ impl From<glutin::ContextError> for Error {
     }
 }
 
+/// Terminal size info.
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
+pub struct SizeInfo<T = f32> {
+    /// Terminal window width.
+    width: T,
+
+    /// Terminal window height.
+    height: T,
+
+    /// Width of individual cell.
+    cell_width: T,
+
+    /// Height of individual cell.
+    cell_height: T,
+
+    /// Horizontal window padding.
+    padding_x: T,
+
+    /// Vertical window padding.
+    padding_y: T,
+
+    /// Number of lines in the viewport.
+    screen_lines: usize,
+
+    /// Number of columns in the viewport.
+    columns: usize,
+}
+
+impl From<SizeInfo<f32>> for SizeInfo<u32> {
+    fn from(size_info: SizeInfo<f32>) -> Self {
+        Self {
+            width: size_info.width as u32,
+            height: size_info.height as u32,
+            cell_width: size_info.cell_width as u32,
+            cell_height: size_info.cell_height as u32,
+            padding_x: size_info.padding_x as u32,
+            padding_y: size_info.padding_y as u32,
+            screen_lines: size_info.screen_lines,
+            columns: size_info.screen_lines,
+        }
+    }
+}
+
+impl From<SizeInfo<f32>> for WindowSize {
+    fn from(size_info: SizeInfo<f32>) -> Self {
+        Self {
+            num_cols: size_info.columns() as u16,
+            num_lines: size_info.screen_lines() as u16,
+            cell_width: size_info.cell_width() as u16,
+            cell_height: size_info.cell_height() as u16,
+        }
+    }
+}
+
+impl<T: Clone + Copy> SizeInfo<T> {
+    #[inline]
+    pub fn width(&self) -> T {
+        self.width
+    }
+
+    #[inline]
+    pub fn height(&self) -> T {
+        self.height
+    }
+
+    #[inline]
+    pub fn cell_width(&self) -> T {
+        self.cell_width
+    }
+
+    #[inline]
+    pub fn cell_height(&self) -> T {
+        self.cell_height
+    }
+
+    #[inline]
+    pub fn padding_x(&self) -> T {
+        self.padding_x
+    }
+
+    #[inline]
+    pub fn padding_y(&self) -> T {
+        self.padding_y
+    }
+}
+
+impl SizeInfo<f32> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        width: f32,
+        height: f32,
+        cell_width: f32,
+        cell_height: f32,
+        mut padding_x: f32,
+        mut padding_y: f32,
+        dynamic_padding: bool,
+    ) -> SizeInfo {
+        if dynamic_padding {
+            padding_x = Self::dynamic_padding(padding_x.floor(), width, cell_width);
+            padding_y = Self::dynamic_padding(padding_y.floor(), height, cell_height);
+        }
+
+        let lines = (height - 2. * padding_y) / cell_height;
+        let screen_lines = cmp::max(lines as usize, MIN_SCREEN_LINES);
+
+        let columns = (width - 2. * padding_x) / cell_width;
+        let columns = cmp::max(columns as usize, MIN_COLUMNS);
+
+        SizeInfo {
+            width,
+            height,
+            cell_width,
+            cell_height,
+            padding_x: padding_x.floor(),
+            padding_y: padding_y.floor(),
+            screen_lines,
+            columns,
+        }
+    }
+
+    #[inline]
+    pub fn reserve_lines(&mut self, count: usize) {
+        self.screen_lines = cmp::max(self.screen_lines.saturating_sub(count), MIN_SCREEN_LINES);
+    }
+
+    /// Check if coordinates are inside the terminal grid.
+    ///
+    /// The padding, message bar or search are not counted as part of the grid.
+    #[inline]
+    pub fn contains_point(&self, x: usize, y: usize) -> bool {
+        x <= (self.padding_x + self.columns as f32 * self.cell_width) as usize
+            && x > self.padding_x as usize
+            && y <= (self.padding_y + self.screen_lines as f32 * self.cell_height) as usize
+            && y > self.padding_y as usize
+    }
+
+    /// Calculate padding to spread it evenly around the terminal content.
+    #[inline]
+    fn dynamic_padding(padding: f32, dimension: f32, cell_dimension: f32) -> f32 {
+        padding + ((dimension - 2. * padding) % cell_dimension) / 2.
+    }
+}
+
+impl TermDimensions for SizeInfo {
+    #[inline]
+    fn columns(&self) -> usize {
+        self.columns
+    }
+
+    #[inline]
+    fn screen_lines(&self) -> usize {
+        self.screen_lines
+    }
+
+    #[inline]
+    fn total_lines(&self) -> usize {
+        self.screen_lines()
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct DisplayUpdate {
     pub dirty: bool,
@@ -204,7 +363,7 @@ pub struct Display {
     is_damage_supported: bool,
     debug_damage: bool,
     damage_rects: Vec<DamageRect>,
-    renderer: QuadRenderer,
+    renderer: Renderer,
     glyph_cache: GlyphCache,
     meter: Meter,
 }
@@ -259,7 +418,7 @@ impl Display {
         )?;
 
         // Create renderer.
-        let mut renderer = QuadRenderer::new()?;
+        let mut renderer = Renderer::new()?;
 
         let scale_factor = window.scale_factor;
         info!("Display scale factor: {}", scale_factor);
@@ -308,9 +467,7 @@ impl Display {
 
         // Clear screen.
         let background_color = config.colors.primary.background;
-        renderer.with_api(config, &size_info, |api| {
-            api.clear(background_color);
-        });
+        renderer.clear(background_color, config.window_opacity());
 
         // Set subpixel anti-aliasing.
         #[cfg(target_os = "macos")]
@@ -325,9 +482,7 @@ impl Display {
         #[cfg(not(any(target_os = "macos", windows)))]
         if is_x11 {
             window.swap_buffers();
-            renderer.with_api(config, &size_info, |api| {
-                api.finish();
-            });
+            renderer.finish();
         }
 
         window.set_visible(true);
@@ -376,7 +531,7 @@ impl Display {
     ///
     /// This will return a tuple of the cell width and height.
     fn update_glyph_cache(
-        renderer: &mut QuadRenderer,
+        renderer: &mut Renderer,
         glyph_cache: &mut GlyphCache,
         scale_factor: f64,
         config: &UiConfig,
@@ -460,10 +615,13 @@ impl Display {
         self.size_info.reserve_lines(message_bar_lines + search_lines);
 
         // Resize PTY.
-        pty_resize_handle.on_resize(&self.size_info);
+        pty_resize_handle.on_resize(self.size_info.into());
 
         // Resize terminal.
         terminal.resize(self.size_info);
+
+        // Update cell size for graphic data
+        terminal.update_cell_size(self.size_info.cell_width() as _, self.size_info.cell_height() as _);
 
         // Resize renderer.
         let physical = PhysicalSize::new(self.size_info.width() as _, self.size_info.height() as _);
@@ -574,9 +732,7 @@ impl Display {
         // Make sure this window's OpenGL context is active.
         self.window.make_current();
 
-        self.renderer.with_api(config, &size_info, |api| {
-            api.clear(background_color);
-        });
+        self.renderer.clear(background_color, config.window_opacity());
 
         if let Some(graphics_queues) = graphics_queues {
             self.renderer.graphics_run_updates(graphics_queues, &size_info);
@@ -596,9 +752,10 @@ impl Display {
             let glyph_cache = &mut self.glyph_cache;
             let highlighted_hint = &self.highlighted_hint;
             let vi_highlighted_hint = &self.vi_highlighted_hint;
-            self.renderer.with_api(config, &size_info, |mut api| {
-                // Iterate over all non-empty cells in the grid.
-                for mut cell in grid_cells {
+            self.renderer.draw_cells(
+                &size_info,
+                glyph_cache,
+                grid_cells.into_iter().map(|mut cell| {
                     // Underline hints hovered by mouse or vi mode cursor.
                     let point = viewport_to_point(display_offset, cell.point);
                     if highlighted_hint.as_ref().map_or(false, |h| h.bounds.contains(&point))
@@ -613,10 +770,9 @@ impl Display {
                     // Track any graphic present in the cell.
                     graphics_list.update(&cell, &size_info);
 
-                    // Draw the cell.
-                    api.draw_cell(cell, glyph_cache);
-                }
-            });
+                    cell
+                }),
+            );
         }
 
         self.renderer.graphics_draw(graphics_list, &size_info);
@@ -686,9 +842,7 @@ impl Display {
             let fg = config.colors.primary.background;
             for (i, message_text) in text.iter().enumerate() {
                 let point = Point::new(start_line + i, Column(0));
-                self.renderer.with_api(config, &size_info, |mut api| {
-                    api.draw_string(glyph_cache, point, fg, bg, message_text);
-                });
+                self.renderer.draw_string(point, fg, bg, message_text, &size_info, glyph_cache);
             }
         } else {
             // Draw rectangles.
@@ -737,9 +891,7 @@ impl Display {
             // On X11 `swap_buffers` does not block for vsync. However the next OpenGl command
             // will block to synchronize (this is `glClear` in Alacritty), which causes a
             // permanent one frame delay.
-            self.renderer.with_api(config, &size_info, |api| {
-                api.finish();
-            });
+            self.renderer.finish();
         }
 
         self.damage_rects.clear();
@@ -844,9 +996,7 @@ impl Display {
         let fg = config.colors.search_bar_foreground();
         let bg = config.colors.search_bar_background();
 
-        self.renderer.with_api(config, size_info, |mut api| {
-            api.draw_string(glyph_cache, point, fg, bg, &text);
-        });
+        self.renderer.draw_string(point, fg, bg, &text, size_info, glyph_cache);
     }
 
     /// Draw render timer.
@@ -864,9 +1014,7 @@ impl Display {
         self.damage_from_point(point, self.size_info.columns() as u32);
 
         let glyph_cache = &mut self.glyph_cache;
-        self.renderer.with_api(config, size_info, |mut api| {
-            api.draw_string(glyph_cache, point, fg, bg, &timing);
-        });
+        self.renderer.draw_string(point, fg, bg, &timing, size_info, glyph_cache);
     }
 
     /// Draw an indicator for the position of a line in history.
@@ -895,8 +1043,9 @@ impl Display {
 
         // Damage the maximum possible length of the format text, which could be achieved when
         // using `MAX_SCROLLBACK_LINES` as current and total lines adding a `3` for formatting.
-        const MAX_LEN: usize = num_digits(MAX_SCROLLBACK_LINES) + 3;
-        self.damage_from_point(Point::new(0, point.column - MAX_LEN), MAX_LEN as u32 * 2);
+        const MAX_SIZE: usize = 2 * num_digits(MAX_SCROLLBACK_LINES) + 3;
+        let damage_point = Point::new(0, Column(size_info.columns().saturating_sub(MAX_SIZE)));
+        self.damage_from_point(damage_point, MAX_SIZE as u32);
 
         let colors = &config.colors;
         let fg = colors.line_indicator.foreground.unwrap_or(colors.primary.background);
@@ -905,9 +1054,7 @@ impl Display {
         // Do not render anything if it would obscure the vi mode cursor.
         if obstructed_column.map_or(true, |obstructed_column| obstructed_column < column) {
             let glyph_cache = &mut self.glyph_cache;
-            self.renderer.with_api(config, size_info, |mut api| {
-                api.draw_string(glyph_cache, point, fg, bg, &text);
-            });
+            self.renderer.draw_string(point, fg, bg, &text, size_info, glyph_cache);
         }
     }
 

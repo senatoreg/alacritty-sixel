@@ -11,10 +11,10 @@ use std::mem::{self, MaybeUninit};
 use crate::display::content::RenderableCell;
 use crate::gl::{self, types::*};
 use crate::renderer::graphics::{shader, GraphicsRenderer};
+use crate::display::SizeInfo;
 
 use alacritty_terminal::graphics::GraphicId;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::SizeInfo;
 
 use log::trace;
 

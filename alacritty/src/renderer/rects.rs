@@ -7,12 +7,12 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::SizeInfo;
 
 use crate::display::content::RenderableCell;
+use crate::display::SizeInfo;
 use crate::gl;
 use crate::gl::types::*;
-use crate::renderer::shader::{ShaderError, ShaderProgram};
+use crate::renderer::shader::{ShaderError, ShaderProgram, ShaderVersion};
 use crate::renderer::{self, cstr};
 
 #[derive(Debug, Copy, Clone)]
@@ -137,7 +137,7 @@ impl RenderLine {
         let line_bottom = (start.line as f32 + 1.) * size.cell_height();
         let baseline = line_bottom + descent;
 
-        let mut y = (baseline - position - thickness / 2.).ceil();
+        let mut y = (baseline - position - thickness / 2.).round();
         let max_y = line_bottom - thickness;
         if y > max_y {
             y = max_y;
@@ -193,6 +193,9 @@ impl RenderLines {
             return;
         }
 
+        // The underline color escape does not apply to strikeout.
+        let color = if flag.contains(Flags::STRIKEOUT) { cell.fg } else { cell.underline };
+
         // Include wide char spacer if the current cell is a wide char.
         let mut end = cell.point;
         if cell.flags.contains(Flags::WIDE_CHAR) {
@@ -201,7 +204,7 @@ impl RenderLines {
 
         // Check if there's an active line.
         if let Some(line) = self.inner.get_mut(&flag).and_then(|lines| lines.last_mut()) {
-            if cell.fg == line.color
+            if color == line.color
                 && cell.point.column == line.end.column + 1
                 && cell.point.line == line.end.line
             {
@@ -212,7 +215,7 @@ impl RenderLines {
         }
 
         // Start new line if there currently is none.
-        let line = RenderLine { start: cell.point, end, color: cell.fg };
+        let line = RenderLine { start: cell.point, end, color };
         match self.inner.get_mut(&flag) {
             Some(lines) => lines.push(line),
             None => {
@@ -252,10 +255,10 @@ pub struct RectRenderer {
 }
 
 impl RectRenderer {
-    pub fn new() -> Result<Self, renderer::Error> {
+    pub fn new(shader_version: ShaderVersion) -> Result<Self, renderer::Error> {
         let mut vao: GLuint = 0;
         let mut vbo: GLuint = 0;
-        let program = RectShaderProgram::new()?;
+        let program = RectShaderProgram::new(shader_version)?;
 
         unsafe {
             // Allocate buffers.
@@ -422,8 +425,8 @@ pub struct RectShaderProgram {
 }
 
 impl RectShaderProgram {
-    pub fn new() -> Result<Self, ShaderError> {
-        let program = ShaderProgram::new(RECT_SHADER_V, RECT_SHADER_F)?;
+    pub fn new(shader_version: ShaderVersion) -> Result<Self, ShaderError> {
+        let program = ShaderProgram::new(shader_version, RECT_SHADER_V, RECT_SHADER_F)?;
 
         Ok(Self {
             u_rect_kind: program.get_uniform_location(cstr!("rectKind"))?,

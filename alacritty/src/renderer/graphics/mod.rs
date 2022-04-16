@@ -3,7 +3,6 @@
 use std::mem;
 
 use alacritty_terminal::graphics::{ColorType, GraphicData, GraphicId, UpdateQueues};
-use alacritty_terminal::term::SizeInfo;
 
 use log::trace;
 use serde::{Deserialize, Serialize};
@@ -11,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::gl;
 use crate::gl::types::*;
 use crate::renderer;
+use crate::display::SizeInfo;
+use crate::renderer::shader::ShaderVersion;
 
 use std::collections::HashMap;
 
@@ -62,8 +63,8 @@ pub struct GraphicsRenderer {
 }
 
 impl GraphicsRenderer {
-    pub fn new() -> Result<GraphicsRenderer, renderer::Error> {
-        let program = shader::GraphicsShaderProgram::new()?;
+    pub fn new(shader_version: ShaderVersion) -> Result<GraphicsRenderer, renderer::Error> {
+        let program = shader::GraphicsShaderProgram::new(shader_version)?;
         Ok(GraphicsRenderer { program, graphic_textures: HashMap::default() })
     }
 

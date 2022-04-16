@@ -32,7 +32,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::search::{Match, RegexSearch};
-use alacritty_terminal::term::{ClipboardType, SizeInfo, Term, TermMode};
+use alacritty_terminal::term::{ClipboardType, Term, TermMode};
 
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::clipboard::Clipboard;
@@ -43,7 +43,7 @@ use crate::daemon::foreground_process_path;
 use crate::daemon::spawn_daemon;
 use crate::display::hint::HintMatch;
 use crate::display::window::Window;
-use crate::display::{self, Display};
+use crate::display::{self, Display, SizeInfo};
 use crate::input::{self, ActionContext as _, FONT_SIZE_STEP};
 use crate::message_bar::{Message, MessageBuffer};
 use crate::scheduler::{Scheduler, TimerId, Topic};
@@ -853,10 +853,9 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
         }
 
         // Reset display offset and cursor position.
+        self.terminal.vi_mode_cursor.point = self.search_state.origin;
         self.terminal.scroll_display(Scroll::Delta(self.search_state.display_offset_delta));
         self.search_state.display_offset_delta = 0;
-        self.terminal.vi_mode_cursor.point =
-            self.search_state.origin.grid_clamp(self.terminal, Boundary::Grid);
 
         *self.dirty = true;
     }
@@ -1079,16 +1078,24 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         }
                     },
                     TerminalEvent::ClipboardStore(clipboard_type, content) => {
-                        self.ctx.clipboard.store(clipboard_type, content);
+                        if self.ctx.terminal.is_focused {
+                            self.ctx.clipboard.store(clipboard_type, content);
+                        }
                     },
                     TerminalEvent::ClipboardLoad(clipboard_type, format) => {
-                        let text = format(self.ctx.clipboard.load(clipboard_type).as_str());
-                        self.ctx.write_to_pty(text.into_bytes());
+                        if self.ctx.terminal.is_focused {
+                            let text = format(self.ctx.clipboard.load(clipboard_type).as_str());
+                            self.ctx.write_to_pty(text.into_bytes());
+                        }
                     },
                     TerminalEvent::ColorRequest(index, format) => {
                         let color = self.ctx.terminal().colors()[index]
                             .unwrap_or(self.ctx.display.colors[index]);
                         self.ctx.write_to_pty(format(color).into_bytes());
+                    },
+                    TerminalEvent::TextAreaSizeRequest(format) => {
+                        let text = format(self.ctx.size_info().into());
+                        self.ctx.write_to_pty(text.into_bytes());
                     },
                     TerminalEvent::PtyWrite(text) => self.ctx.write_to_pty(text.into_bytes()),
                     TerminalEvent::MouseCursorDirty => self.reset_mouse_cursor(),
