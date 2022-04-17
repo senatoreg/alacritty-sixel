@@ -25,10 +25,10 @@ bitflags! {
         const STRIKEOUT                 = 0b0000_0010_0000_0000;
         const LEADING_WIDE_CHAR_SPACER  = 0b0000_0100_0000_0000;
         const DOUBLE_UNDERLINE          = 0b0000_1000_0000_0000;
-        const GRAPHICS                  = 0b0001_0000_0000_0000;
         const UNDERCURL                 = 0b0001_0000_0000_0000;
         const DOTTED_UNDERLINE          = 0b0010_0000_0000_0000;
         const DASHED_UNDERLINE          = 0b0100_0000_0000_0000;
+        const GRAPHICS                  = 0b1000_0000_0000_0000;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits | Self::DOUBLE_UNDERLINE.bits
                                         | Self::UNDERCURL.bits | Self::DOTTED_UNDERLINE.bits
                                         | Self::DASHED_UNDERLINE.bits;
