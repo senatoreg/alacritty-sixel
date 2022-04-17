@@ -94,7 +94,7 @@ impl Renderer {
         let (text_renderer, rect_renderer, graphics_renderer) = if version.as_ref() >= "3.3" {
             let text_renderer = TextRendererProvider::Glsl3(Glsl3Renderer::new()?);
             let rect_renderer = RectRenderer::new(ShaderVersion::Glsl3)?;
-            let graphics_renderer = GraphicsRenderer::new(ShaderVersion::Gles2)?;
+            let graphics_renderer = GraphicsRenderer::new(ShaderVersion::Glsl3)?;
             (text_renderer, rect_renderer, graphics_renderer)
         } else {
             let text_renderer = TextRendererProvider::Gles2(Gles2Renderer::new()?);
