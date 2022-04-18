@@ -16,14 +16,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Track and report surface damage information to Wayland compositors
 - Escape sequence for undercurl, dotted and dashed underlines (`CSI 4 : [3-5] m`)
 - `ToggleMaximized` key binding action to (un-)maximize the active window, not bound by default
+- Support for OpenGL ES 2.0
+- Escape sequence to set underline color (`CSI 58 : 2 : Ps : Ps : Ps m`/`CSI 58 : 5 : Ps m`)
+- Escape sequence to reset underline color (`CSI 59 m`)
 
 ### Changed
 
 - The `--help` output was reworked with a new colorful syntax
+- OSC 52 is now disabled on unfocused windows
 
 ### Fixed
 
 - Creating the IPC socket failing if WAYLAND_DISPLAY contains an absolute path
+- Crash when resetting the terminal while in vi mode
+- `font.glyph_offset` not live reloading
+- Failure when running on 10-bit color system
+- The colors being slightly different when using srgb displays on macOS
+- Vi cursor blinking not reset when navigating in search
+- Scrolling and middle-clicking modifying the primary selection
 
 ## 0.10.1
 
