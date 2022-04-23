@@ -53,9 +53,6 @@ pub struct Vertex {
 
     /// Height, in pixels, of a single cell when the graphic was added.
     pub base_cell_height: f32,
-
-    /// Padding in the y direction, from the terminal's window.
-    pub padding_y: u16,
 }
 
 /// Sources for the graphics rendering program.
@@ -194,7 +191,6 @@ fn define_vertex_attributes(shader_version: ShaderVersion) -> (GLuint, GLuint) {
         float_attr!(UNSIGNED_SHORT, offset_x);
         float_attr!(UNSIGNED_SHORT, offset_y);
         float_attr!(FLOAT, base_cell_height);
-        float_attr!(UNSIGNED_SHORT, padding_y);
 
         for index in 0..attr_index {
             gl::EnableVertexAttribArray(index);
