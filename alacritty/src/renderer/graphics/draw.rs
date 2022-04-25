@@ -24,7 +24,6 @@ struct RenderPosition {
     line: Line,
     offset_x: u16,
     offset_y: u16,
-    padding_y: u16,
 }
 
 /// Track textures to be rendered in the display.
@@ -38,7 +37,7 @@ impl RenderList {
     ///
     /// The graphic is added only the first time it is found in a cell.
     #[inline]
-    pub fn update(&mut self, cell: &RenderableCell, size_info: &SizeInfo) {
+    pub fn update(&mut self, cell: &RenderableCell) {
         if let Some(graphic) = &cell.graphic {
             let graphic_id = graphic.graphic_id();
             if self.items.contains_key(&graphic_id) {
@@ -50,7 +49,6 @@ impl RenderList {
                 line: Line(cell.point.line as i32),
                 offset_x: graphic.offset_x,
                 offset_y: graphic.offset_y,
-                padding_y: size_info.padding_y() as u16,
             };
 
             self.items.insert(graphic_id, render_item);
@@ -87,7 +85,6 @@ impl RenderList {
                 offset_x: render_item.offset_x,
                 offset_y: render_item.offset_y,
                 base_cell_height: graphic_texture.cell_height,
-                padding_y: render_item.padding_y,
             };
 
             vertices.push(vertex);
@@ -119,8 +116,8 @@ impl RenderList {
             );
             gl::Uniform2f(
                 renderer.program.u_view_dimensions,
-                size_info.width(),
-                size_info.height(),
+                size_info.width() - 2. * size_info.padding_x(),
+                size_info.height() - 2. * size_info.padding_y(),
             );
 
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);

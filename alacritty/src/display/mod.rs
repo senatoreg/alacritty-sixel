@@ -768,7 +768,7 @@ impl Display {
                     lines.update(&cell);
 
                     // Track any graphic present in the cell.
-                    graphics_list.update(&cell, &size_info);
+                    graphics_list.update(&cell);
 
                     cell
                 }),
