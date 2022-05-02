@@ -1980,22 +1980,64 @@ impl<T: EventListener> Handler for Term<T> {
     fn graphics_attribute(&mut self, pi: u16, pa: u16) {
         // From Xterm documentation:
         //
+        //   CSI ? Pi ; Pa ; Pv S
+        //
         //   Pi = 1  -> item is number of color registers.
         //   Pi = 2  -> item is Sixel graphics geometry (in pixels).
+        //   Pi = 3  -> item is ReGIS graphics geometry (in pixels).
         //
         //   Pa = 1  -> read attribute.
+        //   Pa = 2  -> reset to default.
+        //   Pa = 3  -> set tot value in Pv.
         //   Pa = 4  -> read the maximum allowed value.
         //
-        // Any other request reports an error.
+        //   Pv is ignored by xterm except when setting (Pa == 3 ).
+        //   Pv = n <- A single integer is used for color registers.
+        //   Pv = width ; height <- Two integers for graphics geometry.
+        //
+        //   xterm replies with a control sequence of the same form:
+        //
+        //   CSI ? Pi ; Ps ; Pv S
+        //
+        //   where Ps is the status:
+        //   Ps = 0  <- success.
+        //   Ps = 1  <- error in Pi.
+        //   Ps = 2  <- error in Pa.
+        //   Ps = 3  <- failure.
+        //
+        //   On success, Pv represents the value read or set.
 
-        let (ps, pv) = if pa == 1 || pa == 4 {
-            match pi {
-                1 => (0, &[sixel::MAX_COLOR_REGISTERS][..]),
-                2 => (0, &MAX_GRAPHIC_DIMENSIONS[..]),
-                _ => (1, &[][..]), // Report error in Pi
+        let width = self.columns() * self.cell_width;
+        let height = self.screen_lines() * self.cell_height;
+        let graphic_dimensions = [
+            cmp::min(width, MAX_GRAPHIC_DIMENSIONS[0]),
+            cmp::min(height, MAX_GRAPHIC_DIMENSIONS[1])];
+
+        let (ps, pv) = match pi {
+            1 => {
+                match pa {
+                    1 => (3, &[][..]), // Report unsupported
+                    2 => (3, &[][..]), // Report unsupported
+                    3 => (3, &[][..]), // Report unsupported
+                    4 => (0, &[sixel::MAX_COLOR_REGISTERS][..]),
+                    _ => (2, &[][..]), // Report error in Pi
+                }
             }
-        } else {
-            (2, &[][..]) // Report error in Pa
+            2 => {
+                match pa {
+                    1 => (0, &graphic_dimensions[..]),
+                    2 => (3, &[][..]), // Report unsupported
+                    3 => (3, &[][..]), // Report unsupported
+                    4 => (0, &MAX_GRAPHIC_DIMENSIONS[..]),
+                    _ => (2, &[][..]), // Report error in Pi
+                }
+            }
+            3 => {
+                (1, &[][..]) // Report error in Pi (ReGIS unknown)
+            }
+            _ => {
+                (1, &[][..]) // Report error in Pi
+            }
         };
 
         let leader_text = format!("\x1b[?{};{}", pi, ps);
