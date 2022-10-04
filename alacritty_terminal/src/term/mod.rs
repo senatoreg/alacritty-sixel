@@ -20,7 +20,7 @@ use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::graphics::{
     sixel, GraphicCell, GraphicData, Graphics, TextureRef, UpdateQueues, MAX_GRAPHIC_DIMENSIONS,
 };
-use crate::term::cell::{Cell, Flags, LineLength};
+use crate::term::cell::{Cell, Flags, Hyperlink, LineLength};
 use crate::term::color::{Colors, Rgb};
 use crate::vi_mode::{ViModeCursor, ViMotion};
 
@@ -79,6 +79,20 @@ impl Default for TermMode {
             | TermMode::URGENCY_HINTS
             | TermMode::SIXEL_PRIV_PALETTE
     }
+}
+
+/// Convert a terminal point to a viewport relative point.
+#[inline]
+pub fn point_to_viewport(display_offset: usize, point: Point) -> Option<Point<usize>> {
+    let viewport_line = point.line.0 + display_offset as i32;
+    usize::try_from(viewport_line).ok().map(|line| Point::new(line, point.column))
+}
+
+/// Convert a viewport relative point to a terminal point.
+#[inline]
+pub fn viewport_to_point(display_offset: usize, point: Point<usize>) -> Point {
+    let line = Line(point.line as i32) - display_offset;
+    Point::new(line, point.column)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +171,9 @@ struct TermDamageState {
     /// Old terminal cursor point.
     last_cursor: Point,
 
+    /// Last Vi cursor point.
+    last_vi_cursor_point: Option<Point<usize>>,
+
     /// Old selection range.
     last_selection: Option<SelectionRange>,
 }
@@ -170,6 +187,7 @@ impl TermDamageState {
             is_fully_damaged: true,
             lines,
             last_cursor: Default::default(),
+            last_vi_cursor_point: Default::default(),
             last_selection: Default::default(),
         }
     }
@@ -178,6 +196,7 @@ impl TermDamageState {
     fn resize(&mut self, num_cols: usize, num_lines: usize) {
         // Reset point, so old cursor won't end up outside of the viewport.
         self.last_cursor = Default::default();
+        self.last_vi_cursor_point = None;
         self.last_selection = None;
         self.is_fully_damaged = true;
 
@@ -371,38 +390,52 @@ impl<T> Term<T> {
             self.mark_fully_damaged();
         }
 
+        // Update tracking of cursor, selection, and vi mode cursor.
+
+        let display_offset = self.grid().display_offset();
+        let vi_cursor_point = if self.mode.contains(TermMode::VI) {
+            point_to_viewport(display_offset, self.vi_mode_cursor.point)
+        } else {
+            None
+        };
+
+        let previous_cursor = mem::replace(&mut self.damage.last_cursor, self.grid.cursor.point);
+        let previous_selection = mem::replace(&mut self.damage.last_selection, selection);
+        let previous_vi_cursor_point =
+            mem::replace(&mut self.damage.last_vi_cursor_point, vi_cursor_point);
+
         // Early return if the entire terminal is damaged.
         if self.damage.is_fully_damaged {
-            self.damage.last_cursor = self.grid.cursor.point;
-            self.damage.last_selection = selection;
             return TermDamage::Full;
         }
 
         // Add information about old cursor position and new one if they are not the same, so we
         // cover everything that was produced by `Term::input`.
-        if self.damage.last_cursor != self.grid.cursor.point {
+        if self.damage.last_cursor != previous_cursor {
             // Cursor cooridanates are always inside viewport even if you have `display_offset`.
-            let point =
-                Point::new(self.damage.last_cursor.line.0 as usize, self.damage.last_cursor.column);
+            let point = Point::new(previous_cursor.line.0 as usize, previous_cursor.column);
             self.damage.damage_point(point);
         }
 
         // Always damage current cursor.
         self.damage_cursor();
-        self.damage.last_cursor = self.grid.cursor.point;
 
-        // Damage Vi cursor if it's present.
-        if self.mode.contains(TermMode::VI) {
-            self.damage_vi_cursor();
+        // Vi mode doesn't update the terminal content, thus only last vi cursor position and the
+        // new one should be damaged.
+        if let Some(previous_vi_cursor_point) = previous_vi_cursor_point {
+            self.damage.damage_point(previous_vi_cursor_point)
         }
 
-        if self.damage.last_selection != selection {
-            let display_offset = self.grid().display_offset();
-            for selection in self.damage.last_selection.into_iter().chain(selection) {
+        // Damage Vi cursor if it's present.
+        if let Some(vi_cursor_point) = self.damage.last_vi_cursor_point {
+            self.damage.damage_point(vi_cursor_point);
+        }
+
+        if self.damage.last_selection != previous_selection {
+            for selection in self.damage.last_selection.into_iter().chain(previous_selection) {
                 self.damage.damage_selection(selection, display_offset, self.columns());
             }
         }
-        self.damage.last_selection = selection;
 
         TermDamage::Partial(TermDamageIterator::new(&self.damage.lines))
     }
@@ -565,15 +598,11 @@ impl<T> Term<T> {
     }
 
     /// Access to the raw grid data structure.
-    ///
-    /// This is a bit of a hack; when the window is closed, the event processor
-    /// serializes the grid state to a file.
     pub fn grid(&self) -> &Grid<Cell> {
         &self.grid
     }
 
-    /// Mutable access for swapping out the grid during tests.
-    #[cfg(test)]
+    /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
         &mut self.grid
     }
@@ -779,9 +808,7 @@ impl<T> Term<T> {
         }
 
         // Move cursor.
-        self.damage_vi_cursor();
         self.vi_mode_cursor = self.vi_mode_cursor.motion(self, motion);
-        self.damage_vi_cursor();
         self.vi_mode_recompute_selection();
     }
 
@@ -791,7 +818,6 @@ impl<T> Term<T> {
     where
         T: EventListener,
     {
-        self.damage_vi_cursor();
         // Move viewport to make point visible.
         self.scroll_to_point(point);
 
@@ -799,7 +825,6 @@ impl<T> Term<T> {
         self.vi_mode_cursor.point = point;
 
         self.vi_mode_recompute_selection();
-        self.damage_vi_cursor();
     }
 
     /// Update the active selection to match the vi mode cursor position.
@@ -955,15 +980,6 @@ impl<T> Term<T> {
         let point =
             Point::new(self.grid.cursor.point.line.0 as usize, self.grid.cursor.point.column);
         self.damage.damage_point(point);
-    }
-
-    /// Damage `Vi` mode cursor.
-    #[inline]
-    pub fn damage_vi_cursor(&mut self) {
-        let line = (self.grid.display_offset() as i32 + self.vi_mode_cursor.point.line.0)
-            .clamp(0, self.screen_lines() as i32 - 1) as usize;
-        let vi_point = Point::new(line, self.vi_mode_cursor.point.column);
-        self.damage.damage_point(vi_point);
     }
 }
 
@@ -1689,6 +1705,12 @@ impl<T: EventListener> Handler for Term<T> {
         }
     }
 
+    #[inline]
+    fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
+        trace!("Setting hyperlink: {:?}", hyperlink);
+        self.grid.cursor.template.set_hyperlink(hyperlink);
+    }
+
     /// Set a terminal attribute.
     #[inline]
     fn terminal_attribute(&mut self, attr: Attr) {
@@ -2269,6 +2291,7 @@ pub mod test {
     use unicode_width::UnicodeWidthChar;
 
     use crate::config::Config;
+    use crate::event::VoidListener;
     use crate::index::Column;
 
     #[derive(Serialize, Deserialize)]
@@ -2316,7 +2339,7 @@ pub mod test {
     ///     hello\n:)\r\ntest",
     /// );
     /// ```
-    pub fn mock_term(content: &str) -> Term<()> {
+    pub fn mock_term(content: &str) -> Term<VoidListener> {
         let lines: Vec<&str> = content.split('\n').collect();
         let num_cols = lines
             .iter()
@@ -2326,7 +2349,7 @@ pub mod test {
 
         // Create terminal with the appropriate dimensions.
         let size = TermSize::new(num_cols, lines.len());
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Fill terminal with content.
         for (line, text) in lines.iter().enumerate() {
@@ -2362,6 +2385,7 @@ mod tests {
 
     use crate::ansi::{self, CharsetIndex, Handler, StandardCharset};
     use crate::config::Config;
+    use crate::event::VoidListener;
     use crate::grid::{Grid, Scroll};
     use crate::index::{Column, Point, Side};
     use crate::selection::{Selection, SelectionType};
@@ -2371,7 +2395,7 @@ mod tests {
     #[test]
     fn scroll_display_page_up() {
         let size = TermSize::new(5, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 11 lines of scrollback.
         for _ in 0..20 {
@@ -2397,7 +2421,7 @@ mod tests {
     #[test]
     fn scroll_display_page_down() {
         let size = TermSize::new(5, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 11 lines of scrollback.
         for _ in 0..20 {
@@ -2427,7 +2451,7 @@ mod tests {
     #[test]
     fn simple_selection_works() {
         let size = TermSize::new(5, 5);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
         let grid = term.grid_mut();
         for i in 0..4 {
             if i == 1 {
@@ -2473,7 +2497,7 @@ mod tests {
     #[test]
     fn semantic_selection_works() {
         let size = TermSize::new(5, 3);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
         let mut grid: Grid<Cell> = Grid::new(3, 5, 0);
         for i in 0..5 {
             for j in 0..2 {
@@ -2521,7 +2545,7 @@ mod tests {
     #[test]
     fn line_selection_works() {
         let size = TermSize::new(5, 1);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
         let mut grid: Grid<Cell> = Grid::new(1, 5, 0);
         for i in 0..5 {
             grid[Line(0)][Column(i)].c = 'a';
@@ -2542,7 +2566,7 @@ mod tests {
     #[test]
     fn block_selection_works() {
         let size = TermSize::new(5, 5);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
         let grid = term.grid_mut();
         for i in 1..4 {
             grid[Line(i)][Column(0)].c = '"';
@@ -2598,7 +2622,7 @@ mod tests {
     #[test]
     fn input_line_drawing_character() {
         let size = TermSize::new(7, 17);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
         let cursor = Point::new(Line(0), Column(0));
         term.configure_charset(CharsetIndex::G0, StandardCharset::SpecialCharacterAndLineDrawing);
         term.input('a');
@@ -2609,7 +2633,7 @@ mod tests {
     #[test]
     fn clearing_viewport_keeps_history_position() {
         let size = TermSize::new(10, 20);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..29 {
@@ -2630,7 +2654,7 @@ mod tests {
     #[test]
     fn clearing_viewport_with_vi_mode_keeps_history_position() {
         let size = TermSize::new(10, 20);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..29 {
@@ -2656,7 +2680,7 @@ mod tests {
     #[test]
     fn clearing_scrollback_resets_display_offset() {
         let size = TermSize::new(10, 20);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..29 {
@@ -2677,7 +2701,7 @@ mod tests {
     #[test]
     fn clearing_scrollback_sets_vi_cursor_into_viewport() {
         let size = TermSize::new(10, 20);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..29 {
@@ -2703,7 +2727,7 @@ mod tests {
     #[test]
     fn clear_saved_lines() {
         let size = TermSize::new(7, 17);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Add one line of scrollback.
         term.grid.scroll_up(&(Line(0)..Line(1)), 1);
@@ -2725,7 +2749,7 @@ mod tests {
     #[test]
     fn vi_cursor_keep_pos_on_scrollback_buffer() {
         let size = TermSize::new(5, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 11 lines of scrollback.
         for _ in 0..20 {
@@ -2745,7 +2769,7 @@ mod tests {
     #[test]
     fn grow_lines_updates_active_cursor_pos() {
         let mut size = TermSize::new(100, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..19 {
@@ -2765,7 +2789,7 @@ mod tests {
     #[test]
     fn grow_lines_updates_inactive_cursor_pos() {
         let mut size = TermSize::new(100, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..19 {
@@ -2791,7 +2815,7 @@ mod tests {
     #[test]
     fn shrink_lines_updates_active_cursor_pos() {
         let mut size = TermSize::new(100, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..19 {
@@ -2811,7 +2835,7 @@ mod tests {
     #[test]
     fn shrink_lines_updates_inactive_cursor_pos() {
         let mut size = TermSize::new(100, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Create 10 lines of scrollback.
         for _ in 0..19 {
@@ -2837,7 +2861,7 @@ mod tests {
     #[test]
     fn damage_public_usage() {
         let size = TermSize::new(10, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
         // Reset terminal for partial damage tests since it's initialized as fully damaged.
         term.reset_damage();
 
@@ -2904,6 +2928,19 @@ mod tests {
         let line = vi_cursor_point.line.0 as usize;
         let left = vi_cursor_point.column.0 as usize;
         let right = left;
+
+        let mut damaged_lines = match term.damage(None) {
+            TermDamage::Full => panic!("Expected partial damage, however got Full"),
+            TermDamage::Partial(damaged_lines) => damaged_lines,
+        };
+        // Skip cursor damage information, since we're just testing Vi cursor.
+        damaged_lines.next();
+        assert_eq!(damaged_lines.next(), Some(LineDamageBounds { line, left, right }));
+        assert_eq!(damaged_lines.next(), None);
+
+        // Ensure that old Vi cursor got damaged as well.
+        term.reset_damage();
+        term.toggle_vi_mode();
         let mut damaged_lines = match term.damage(None) {
             TermDamage::Full => panic!("Expected partial damage, however got Full"),
             TermDamage::Partial(damaged_lines) => damaged_lines,
@@ -2917,7 +2954,7 @@ mod tests {
     #[test]
     fn damage_cursor_movements() {
         let size = TermSize::new(10, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
         let num_cols = term.columns();
         // Reset terminal for partial damage tests since it's initialized as fully damaged.
         term.reset_damage();
@@ -3013,41 +3050,9 @@ mod tests {
     }
 
     #[test]
-    fn damage_vi_movements() {
-        let size = TermSize::new(10, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
-        let num_cols = term.columns();
-        // Reset terminal for partial damage tests since it's initialized as fully damaged.
-        term.reset_damage();
-
-        // Enable Vi mode.
-        term.toggle_vi_mode();
-
-        // NOTE While we can use `[Term::damage]` to access terminal damage information, in the
-        // following tests we will be accessing `term.damage.lines` directly to avoid adding extra
-        // damage information (like cursor and Vi cursor), which we're not testing.
-
-        term.vi_goto_point(Point::new(Line(5), Column(5)));
-        assert_eq!(term.damage.lines[0], LineDamageBounds { line: 0, left: 0, right: 0 });
-        assert_eq!(term.damage.lines[5], LineDamageBounds { line: 5, left: 5, right: 5 });
-        term.damage.reset(num_cols);
-
-        term.vi_motion(ViMotion::Up);
-        term.vi_motion(ViMotion::Right);
-        term.vi_motion(ViMotion::Up);
-        term.vi_motion(ViMotion::Left);
-        assert_eq!(term.damage.lines[3], LineDamageBounds { line: 3, left: 5, right: 6 });
-        assert_eq!(term.damage.lines[4], LineDamageBounds { line: 4, left: 5, right: 6 });
-        assert_eq!(term.damage.lines[5], LineDamageBounds { line: 5, left: 5, right: 5 });
-
-        // Ensure that we haven't damaged entire terminal during the test.
-        assert!(!term.damage.is_fully_damaged);
-    }
-
-    #[test]
     fn full_damage() {
         let size = TermSize::new(100, 10);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         assert!(term.damage.is_fully_damaged);
         for _ in 0..20 {
@@ -3133,7 +3138,7 @@ mod tests {
     #[test]
     fn window_title() {
         let size = TermSize::new(7, 17);
-        let mut term = Term::new(&Config::default(), &size, ());
+        let mut term = Term::new(&Config::default(), &size, VoidListener);
 
         // Title None by default.
         assert_eq!(term.title, None);

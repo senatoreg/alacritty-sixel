@@ -24,9 +24,25 @@ use glyph_cache::{Glyph, LoadGlyph};
 bitflags! {
     #[repr(C)]
     struct RenderingGlyphFlags: u8 {
-        const WIDE_CHAR = 0b0000_0001;
-        const COLORED   = 0b0000_0010;
+        const COLORED   = 0b0000_0001;
+        const WIDE_CHAR = 0b0000_0010;
     }
+}
+
+/// Rendering passes, for both GLES2 and GLSL3 renderer.
+#[repr(u8)]
+enum RenderingPass {
+    /// Rendering pass used to render background color in text shaders.
+    Background = 0,
+
+    /// The first pass to render text with both GLES2 and GLSL3 renderers.
+    SubpixelPass1 = 1,
+
+    /// The second pass to render text with GLES2 renderer.
+    SubpixelPass2 = 2,
+
+    /// The third pass to render text with GLES2 renderer.
+    SubpixelPass3 = 3,
 }
 
 pub trait TextRenderer<'a> {
@@ -145,7 +161,9 @@ pub trait TextRenderApi<T: TextRenderBatch>: LoadGlyph {
         self.add_render_item(&cell, &glyph, size_info);
 
         // Render visible zero-width characters.
-        if let Some(zerowidth) = cell.zerowidth.take().filter(|_| !hidden) {
+        if let Some(zerowidth) =
+            cell.extra.as_mut().and_then(|extra| extra.zerowidth.take().filter(|_| !hidden))
+        {
             for character in zerowidth {
                 glyph_key.character = character;
                 let glyph = glyph_cache.get(glyph_key, self, false);
