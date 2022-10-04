@@ -91,6 +91,7 @@ fn box_drawing(character: char, metrics: &Metrics, offset: &Delta<i8>) -> Raster
                 height: height as i32,
                 width: width as i32,
                 buffer,
+                advance: (width as i32, height as i32),
             };
         },
         _ => Canvas::new(width, height),
@@ -274,7 +275,7 @@ fn box_drawing(character: char, metrics: &Metrics, offset: &Delta<i8>) -> Raster
                 '\u{2561}'..='\u{2563}' | '\u{256a}' | '\u{256c}' => {
                     (v_left_bounds.1, v_left_bounds.1)
                 },
-                '\u{2564}'..='\u{2566}' => (canvas.x_center(), v_left_bounds.1),
+                '\u{2564}'..='\u{2568}' => (canvas.x_center(), v_left_bounds.1),
                 '\u{2569}'..='\u{2569}' => (v_left_bounds.1, canvas.x_center()),
                 _ => (0., 0.),
             };
@@ -297,13 +298,13 @@ fn box_drawing(character: char, metrics: &Metrics, offset: &Delta<i8>) -> Raster
             // Top vertical part.
             let (left_top_size, right_top_size) = match character {
                 '\u{2551}' | '\u{256a}' => (canvas.y_center(), canvas.y_center()),
-                '\u{2558}'..='\u{255c}' | '\u{2567}' | '\u{2568}' => {
-                    (h_bot_bounds.1, h_top_bounds.1)
-                },
+                '\u{2558}'..='\u{255c}' | '\u{2568}' => (h_bot_bounds.1, h_top_bounds.1),
                 '\u{255d}' => (h_top_bounds.1, h_bot_bounds.1),
                 '\u{255e}'..='\u{2560}' => (canvas.y_center(), h_top_bounds.1),
                 '\u{2561}'..='\u{2563}' => (h_top_bounds.1, canvas.y_center()),
-                '\u{2569}' | '\u{256b}' | '\u{256c}' => (h_top_bounds.1, h_top_bounds.1),
+                '\u{2567}' | '\u{2569}' | '\u{256b}' | '\u{256c}' => {
+                    (h_top_bounds.1, h_top_bounds.1)
+                },
                 _ => (0., 0.),
             };
 
@@ -412,7 +413,7 @@ fn box_drawing(character: char, metrics: &Metrics, offset: &Delta<i8>) -> Raster
             };
 
             // Fix `y` coordinates.
-            y = height - y;
+            y = (height - y).round();
 
             // Ensure that resulted glyph will be visible and also round sizes instead of straight
             // flooring them.
@@ -479,7 +480,15 @@ fn box_drawing(character: char, metrics: &Metrics, offset: &Delta<i8>) -> Raster
 
     let top = height as i32 + metrics.descent as i32;
     let buffer = BitmapBuffer::Rgb(canvas.into_raw());
-    RasterizedGlyph { character, top, left: 0, height: height as i32, width: width as i32, buffer }
+    RasterizedGlyph {
+        character,
+        top,
+        left: 0,
+        height: height as i32,
+        width: width as i32,
+        buffer,
+        advance: (width as i32, height as i32),
+    }
 }
 
 #[repr(packed)]

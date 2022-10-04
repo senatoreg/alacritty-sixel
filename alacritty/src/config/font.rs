@@ -4,7 +4,7 @@ use crossfont::Size as FontSize;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use alacritty_config_derive::ConfigDeserialize;
+use alacritty_config_derive::{ConfigDeserialize, SerdeReplace};
 
 use crate::config::ui_config::Delta;
 
@@ -22,6 +22,7 @@ pub struct Font {
     /// Glyph offset within character cell.
     pub glyph_offset: Delta<i8>,
 
+    #[config(removed = "set the AppleFontSmoothing user default instead")]
     pub use_thin_strokes: bool,
 
     /// Normal font face.
@@ -79,8 +80,8 @@ impl Default for Font {
     fn default() -> Font {
         Self {
             builtin_box_drawing: true,
-            use_thin_strokes: Default::default(),
             glyph_offset: Default::default(),
+            use_thin_strokes: Default::default(),
             bold_italic: Default::default(),
             italic: Default::default(),
             offset: Default::default(),
@@ -128,7 +129,7 @@ impl SecondaryFontDescription {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(SerdeReplace, Debug, Clone, PartialEq, Eq)]
 struct Size(FontSize);
 
 impl Default for Size {

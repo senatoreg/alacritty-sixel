@@ -141,7 +141,6 @@ impl<T: EventListener> Execute<T> for Action {
         match self {
             Action::Esc(s) => {
                 ctx.on_typing_start();
-
                 ctx.clear_selection();
                 ctx.scroll(Scroll::Bottom);
                 ctx.write_to_pty(s.clone().into_bytes())
@@ -229,6 +228,15 @@ impl<T: EventListener> Execute<T> for Action {
                     ctx.terminal_mut().vi_goto_point(*regex_match.end());
                     ctx.mark_dirty();
                 }
+            },
+            Action::Vi(ViAction::CenterAroundViCursor) => {
+                let term = ctx.terminal();
+                let display_offset = term.grid().display_offset() as i32;
+                let target = -display_offset + term.screen_lines() as i32 / 2 - 1;
+                let line = term.vi_mode_cursor.point.line;
+                let scroll_lines = target - line.0;
+
+                ctx.scroll(Scroll::Delta(scroll_lines));
             },
             Action::Search(SearchAction::SearchFocusNext) => {
                 ctx.advance_search_origin(ctx.search_direction());
@@ -588,6 +596,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // Move vi mode cursor to mouse click position.
         if self.ctx.terminal().mode().contains(TermMode::VI) && !self.ctx.search_active() {
             self.ctx.terminal_mut().vi_mode_cursor.point = point;
+            self.ctx.mark_dirty();
         }
     }
 
@@ -677,9 +686,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let multiplier = f64::from(self.ctx.config().terminal_config.scrolling.multiplier);
             self.ctx.mouse_mut().scroll_px += new_scroll_px * multiplier;
 
-            let lines = self.ctx.mouse().scroll_px / height;
+            let lines = (self.ctx.mouse().scroll_px / height) as i32;
 
-            self.ctx.scroll(Scroll::Delta(lines as i32));
+            if lines != 0 {
+                self.ctx.scroll(Scroll::Delta(lines));
+            }
         }
 
         self.ctx.mouse_mut().scroll_px %= height;
@@ -708,13 +719,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         {
             let size = self.ctx.size_info();
 
-            let current_lines = self.ctx.message().map(|m| m.text(&size).len()).unwrap_or(0);
+            let current_lines = self.ctx.message().map_or(0, |m| m.text(&size).len());
 
             self.ctx.clear_selection();
             self.ctx.pop_message();
 
             // Reset cursor when message bar height changed or all messages are gone.
-            let new_lines = self.ctx.message().map(|m| m.text(&size).len()).unwrap_or(0);
+            let new_lines = self.ctx.message().map_or(0, |m| m.text(&size).len());
 
             let new_icon = match current_lines.cmp(&new_lines) {
                 Ordering::Less => CursorIcon::Default,
@@ -743,6 +754,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Process key input.
     pub fn key_input(&mut self, input: KeyboardInput) {
+        // IME input will be applied on commit and shouldn't trigger key bindings.
+        if self.ctx.display().ime.preedit().is_some() {
+            return;
+        }
+
         // All key bindings are disabled while a hint is being selected.
         if self.ctx.display().hint_state.active() {
             *self.ctx.suppress_chars() = false;
@@ -789,6 +805,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// Process a received character.
     pub fn received_char(&mut self, c: char) {
         let suppress_chars = *self.ctx.suppress_chars();
+
+        // Don't insert chars when we have IME running.
+        if self.ctx.display().ime.preedit().is_some() {
+            return;
+        }
 
         // Handle hint selection over anything else.
         if self.ctx.display().hint_state.active() && !suppress_chars {
@@ -913,9 +934,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     fn cursor_state(&mut self) -> CursorIcon {
         let display_offset = self.ctx.terminal().grid().display_offset();
         let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let hyperlink = self.ctx.terminal().grid()[point].hyperlink();
 
         // Function to check if mouse is on top of a hint.
-        let hint_highlighted = |hint: &HintMatch| hint.bounds.contains(&point);
+        let hint_highlighted = |hint: &HintMatch| hint.should_highlight(point, hyperlink.as_ref());
 
         if let Some(mouse_state) = self.message_bar_cursor_state() {
             mouse_state
@@ -969,7 +991,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 mod tests {
     use super::*;
 
-    use glutin::event::{Event as GlutinEvent, VirtualKeyCode, WindowEvent};
+    use glutin::event::{DeviceId, Event as GlutinEvent, VirtualKeyCode, WindowEvent};
+    use glutin::window::WindowId;
 
     use alacritty_terminal::event::Event as TerminalEvent;
 
@@ -1181,10 +1204,10 @@ mod tests {
             event: WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
-                device_id: unsafe { std::mem::transmute_copy(&0) },
+                device_id: unsafe { DeviceId::dummy() },
                 modifiers: ModifiersState::default(),
             },
-            window_id: unsafe { std::mem::transmute_copy(&0) },
+            window_id: unsafe { WindowId::dummy() },
         },
         end_state: ClickState::Click,
     }
@@ -1197,10 +1220,10 @@ mod tests {
             event: WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
-                device_id: unsafe { std::mem::transmute_copy(&0) },
+                device_id: unsafe { DeviceId::dummy() },
                 modifiers: ModifiersState::default(),
             },
-            window_id: unsafe { std::mem::transmute_copy(&0) },
+            window_id: unsafe { WindowId::dummy() },
         },
         end_state: ClickState::Click,
     }
@@ -1213,10 +1236,10 @@ mod tests {
             event: WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Middle,
-                device_id: unsafe { std::mem::transmute_copy(&0) },
+                device_id: unsafe { DeviceId::dummy() },
                 modifiers: ModifiersState::default(),
             },
-            window_id: unsafe { std::mem::transmute_copy(&0) },
+            window_id: unsafe { WindowId::dummy() },
         },
         end_state: ClickState::Click,
     }
@@ -1229,10 +1252,10 @@ mod tests {
             event: WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
-                device_id: unsafe { std::mem::transmute_copy(&0) },
+                device_id: unsafe { DeviceId::dummy() },
                 modifiers: ModifiersState::default(),
             },
-            window_id: unsafe { std::mem::transmute_copy(&0) },
+            window_id: unsafe { WindowId::dummy() },
         },
         end_state: ClickState::DoubleClick,
     }
@@ -1245,10 +1268,10 @@ mod tests {
             event: WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
-                device_id: unsafe { std::mem::transmute_copy(&0) },
+                device_id: unsafe { DeviceId::dummy() },
                 modifiers: ModifiersState::default(),
             },
-            window_id: unsafe { std::mem::transmute_copy(&0) },
+            window_id: unsafe { WindowId::dummy() },
         },
         end_state: ClickState::TripleClick,
     }
@@ -1261,10 +1284,10 @@ mod tests {
             event: WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
-                device_id: unsafe { std::mem::transmute_copy(&0) },
+                device_id: unsafe { DeviceId::dummy() },
                 modifiers: ModifiersState::default(),
             },
-            window_id: unsafe { std::mem::transmute_copy(&0) },
+            window_id: unsafe { WindowId::dummy() },
         },
         end_state: ClickState::Click,
     }

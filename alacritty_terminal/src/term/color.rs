@@ -7,12 +7,14 @@ use serde::de::{Error as _, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::Value;
 
+use alacritty_config_derive::SerdeReplace;
+
 use crate::ansi::NamedColor;
 
 /// Number of terminal colors.
 pub const COUNT: usize = 269;
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone, Default, Serialize)]
+#[derive(SerdeReplace, Debug, Eq, PartialEq, Copy, Clone, Default, Serialize)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,
@@ -20,8 +22,8 @@ pub struct Rgb {
 }
 
 impl Rgb {
-    /// Implementation of W3C's luminance algorithm:
-    /// https://www.w3.org/TR/WCAG20/#relativeluminancedef
+    /// Implementation of W3C's luminance
+    /// [algorithm](https://www.w3.org/TR/WCAG20/#relativeluminancedef)
     fn luminance(self) -> f64 {
         let channel_luminance = |channel| {
             let channel = channel as f64 / 255.;
@@ -170,7 +172,7 @@ impl FromStr for Rgb {
 }
 
 /// RGB color optionally referencing the cell's foreground or background.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(SerdeReplace, Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CellRgb {
     CellForeground,
     CellBackground,
@@ -287,23 +289,21 @@ impl IndexMut<NamedColor> for Colors {
 mod tests {
     use super::*;
 
-    use std::f64::EPSILON;
-
     #[test]
     fn contrast() {
         let rgb1 = Rgb { r: 0xff, g: 0xff, b: 0xff };
         let rgb2 = Rgb { r: 0x00, g: 0x00, b: 0x00 };
-        assert!((rgb1.contrast(rgb2) - 21.).abs() < EPSILON);
+        assert!((rgb1.contrast(rgb2) - 21.).abs() < f64::EPSILON);
 
         let rgb1 = Rgb { r: 0xff, g: 0xff, b: 0xff };
-        assert!((rgb1.contrast(rgb1) - 1.).abs() < EPSILON);
+        assert!((rgb1.contrast(rgb1) - 1.).abs() < f64::EPSILON);
 
         let rgb1 = Rgb { r: 0xff, g: 0x00, b: 0xff };
         let rgb2 = Rgb { r: 0x00, g: 0xff, b: 0x00 };
-        assert!((rgb1.contrast(rgb2) - 2.285_543_608_124_253_3).abs() < EPSILON);
+        assert!((rgb1.contrast(rgb2) - 2.285_543_608_124_253_3).abs() < f64::EPSILON);
 
         let rgb1 = Rgb { r: 0x12, g: 0x34, b: 0x56 };
         let rgb2 = Rgb { r: 0xfe, g: 0xdc, b: 0xba };
-        assert!((rgb1.contrast(rgb2) - 9.786_558_997_257_74).abs() < EPSILON);
+        assert!((rgb1.contrast(rgb2) - 9.786_558_997_257_74).abs() < f64::EPSILON);
     }
 }

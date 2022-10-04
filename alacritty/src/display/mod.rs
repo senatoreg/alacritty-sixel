@@ -1,7 +1,6 @@
 //! The display subsystem including window management, font rasterization, and
 //! GPU drawing.
 
-use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
 use std::sync::atomic::Ordering;
@@ -17,13 +16,13 @@ use glutin::Rect as DamageRect;
 use log::{debug, info};
 use parking_lot::MutexGuard;
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthChar;
 #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
 use wayland_client::EventQueue;
 
 use crossfont::{self, Rasterize, Rasterizer};
+use unicode_width::UnicodeWidthChar;
 
-use alacritty_terminal::ansi::NamedColor;
+use alacritty_terminal::ansi::{CursorShape, NamedColor};
 use alacritty_terminal::config::MAX_SCROLLBACK_LINES;
 use alacritty_terminal::event::{EventListener, OnResize, WindowSize};
 use alacritty_terminal::grid::Dimensions as TermDimensions;
@@ -31,7 +30,7 @@ use alacritty_terminal::index::{Column, Direction, Line, Point};
 use alacritty_terminal::selection::{Selection, SelectionRange};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Rgb;
-use alacritty_terminal::term::{Term, TermDamage, TermMode, MIN_COLUMNS, MIN_SCREEN_LINES};
+use alacritty_terminal::term::{self, Term, TermDamage, TermMode, MIN_COLUMNS, MIN_SCREEN_LINES};
 
 use crate::config::font::Font;
 #[cfg(not(windows))]
@@ -40,7 +39,7 @@ use crate::config::window::{Dimensions, Identity};
 use crate::config::UiConfig;
 use crate::display::bell::VisualBell;
 use crate::display::color::List;
-use crate::display::content::RenderableContent;
+use crate::display::content::{RenderableContent, RenderableCursor};
 use crate::display::cursor::IntoRects;
 use crate::display::damage::RenderDamageIterator;
 use crate::display::hint::{HintMatch, HintState};
@@ -48,8 +47,9 @@ use crate::display::meter::Meter;
 use crate::display::window::Window;
 use crate::event::{Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
-use crate::renderer::rects::{RenderLines, RenderRect};
+use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::{self, GlyphCache, Renderer};
+use crate::string::{ShortenDirection, StrShortener};
 
 pub mod content;
 pub mod cursor;
@@ -61,14 +61,14 @@ mod color;
 mod damage;
 mod meter;
 
-/// Maximum number of linewraps followed outside of the viewport during search highlighting.
-pub const MAX_SEARCH_LINES: usize = 100;
-
 /// Label for the forward terminal search bar.
 const FORWARD_SEARCH_LABEL: &str = "Search: ";
 
 /// Label for the backward terminal search bar.
 const BACKWARD_SEARCH_LABEL: &str = "Backward Search: ";
+
+/// The character used to shorten the visible text like uri preview or search regex.
+const SHORTENER: char = '…';
 
 /// Color which is used to highlight damaged rects when debugging.
 const DAMAGE_RECT_COLOR: Rgb = Rgb { r: 255, g: 0, b: 255 };
@@ -135,7 +135,7 @@ impl From<glutin::ContextError> for Error {
 }
 
 /// Terminal size info.
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SizeInfo<T = f32> {
     /// Terminal window width.
     width: T,
@@ -294,7 +294,7 @@ impl TermDimensions for SizeInfo {
     }
 }
 
-#[derive(Default, Clone, Debug, PartialEq)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct DisplayUpdate {
     pub dirty: bool,
 
@@ -360,12 +360,106 @@ pub struct Display {
     /// Unprocessed display updates.
     pub pending_update: DisplayUpdate,
 
+    /// The renderer update that takes place only once before the actual rendering.
+    pub pending_renderer_update: Option<RendererUpdate>,
+
+    /// The ime on the given display.
+    pub ime: Ime,
+
+    // Mouse point position when highlighting hints.
+    hint_mouse_point: Option<Point>,
+
     is_damage_supported: bool,
     debug_damage: bool,
     damage_rects: Vec<DamageRect>,
+    next_frame_damage_rects: Vec<DamageRect>,
     renderer: Renderer,
     glyph_cache: GlyphCache,
     meter: Meter,
+}
+
+/// Input method state.
+#[derive(Debug, Default)]
+pub struct Ime {
+    /// Whether the IME is enabled.
+    enabled: bool,
+
+    /// Current IME preedit.
+    preedit: Option<Preedit>,
+}
+
+impl Ime {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    #[inline]
+    pub fn set_enabled(&mut self, is_enabled: bool) {
+        if is_enabled {
+            self.enabled = is_enabled
+        } else {
+            // Clear state when disabling IME.
+            *self = Default::default();
+        }
+    }
+
+    #[inline]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[inline]
+    pub fn set_preedit(&mut self, preedit: Option<Preedit>) {
+        self.preedit = preedit;
+    }
+
+    #[inline]
+    pub fn preedit(&self) -> Option<&Preedit> {
+        self.preedit.as_ref()
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Preedit {
+    /// The preedit text.
+    text: String,
+
+    /// Byte offset for cursor start into the preedit text.
+    ///
+    /// `None` means that the cursor is invisible.
+    cursor_byte_offset: Option<usize>,
+
+    /// The cursor offset from the end of the preedit in char width.
+    cursor_end_offset: Option<usize>,
+}
+
+impl Preedit {
+    pub fn new(text: String, cursor_byte_offset: Option<usize>) -> Self {
+        let cursor_end_offset = if let Some(byte_offset) = cursor_byte_offset {
+            // Convert byte offset into char offset.
+            let cursor_end_offset =
+                text[byte_offset..].chars().fold(0, |acc, ch| acc + ch.width().unwrap_or(1));
+
+            Some(cursor_end_offset)
+        } else {
+            None
+        };
+
+        Self { text, cursor_byte_offset, cursor_end_offset }
+    }
+}
+
+/// Pending renderer updates.
+///
+/// All renderer updates are cached to be applied just before rendering, to avoid platform-specific
+/// rendering issues.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct RendererUpdate {
+    /// Should resize the window.
+    resize: bool,
+
+    /// Clear font caches.
+    clear_font_cache: bool,
 }
 
 impl Display {
@@ -384,7 +478,7 @@ impl Display {
         // Guess scale_factor based on first monitor. On Wayland the initial frame always renders at
         // a scale factor of 1.
         let estimated_scale_factor = if cfg!(any(target_os = "macos", windows)) || is_x11 {
-            event_loop.available_monitors().next().map(|m| m.scale_factor()).unwrap_or(1.)
+            event_loop.available_monitors().next().map_or(1., |m| m.scale_factor())
         } else {
             1.
         };
@@ -392,7 +486,7 @@ impl Display {
         // Guess the target window dimensions.
         debug!("Loading \"{}\" font", &config.font.normal().family);
         let font = &config.font;
-        let rasterizer = Rasterizer::new(estimated_scale_factor as f32, font.use_thin_strokes)?;
+        let rasterizer = Rasterizer::new(estimated_scale_factor as f32)?;
         let mut glyph_cache = GlyphCache::new(rasterizer, font)?;
         let metrics = glyph_cache.font_metrics();
         let (cell_width, cell_height) = compute_cell_size(config, &metrics);
@@ -426,7 +520,7 @@ impl Display {
         // If the scaling factor changed update the glyph cache and mark for resize.
         let should_resize = (estimated_scale_factor - window.scale_factor).abs() > f64::EPSILON;
         let (cell_width, cell_height) = if should_resize {
-            Self::update_glyph_cache(&mut renderer, &mut glyph_cache, scale_factor, config, font)
+            Self::update_font_size(&mut glyph_cache, scale_factor, config, font)
         } else {
             (cell_width, cell_height)
         };
@@ -434,7 +528,7 @@ impl Display {
         // Load font common glyphs to accelerate rendering.
         debug!("Filling glyph cache with common glyphs");
         renderer.with_loader(|mut api| {
-            glyph_cache.load_common_glyphs(&mut api);
+            glyph_cache.reset_glyph_cache(&mut api);
         });
 
         if let Some(dimensions) = dimensions.filter(|_| should_resize) {
@@ -469,10 +563,6 @@ impl Display {
         let background_color = config.colors.primary.background;
         renderer.clear(background_color, config.window_opacity());
 
-        // Set subpixel anti-aliasing.
-        #[cfg(target_os = "macos")]
-        crossfont::set_font_smoothing(config.font.use_thin_strokes);
-
         // Disable shadows for transparent windows on macOS.
         #[cfg(target_os = "macos")]
         window.set_has_shadow(config.window_opacity() >= 1.0);
@@ -500,10 +590,11 @@ impl Display {
         let hint_state = HintState::new(config.hints.alphabet());
         let is_damage_supported = window.swap_buffers_with_damage_supported();
         let debug_damage = config.debug.highlight_damage;
-        let damage_rects = if is_damage_supported || debug_damage {
-            Vec::with_capacity(size_info.screen_lines())
+        let (damage_rects, next_frame_damage_rects) = if is_damage_supported || debug_damage {
+            let vec = Vec::with_capacity(size_info.screen_lines());
+            (vec.clone(), vec)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
         Ok(Self {
@@ -513,6 +604,7 @@ impl Display {
             hint_state,
             meter: Meter::new(),
             size_info,
+            ime: Ime::new(),
             highlighted_hint: None,
             vi_highlighted_hint: None,
             #[cfg(not(any(target_os = "macos", windows)))]
@@ -521,39 +613,43 @@ impl Display {
             visual_bell: VisualBell::from(&config.bell),
             colors: List::from(&config.colors),
             pending_update: Default::default(),
+            pending_renderer_update: Default::default(),
             is_damage_supported,
             debug_damage,
             damage_rects,
+            next_frame_damage_rects,
+            hint_mouse_point: None,
         })
     }
 
     /// Update font size and cell dimensions.
     ///
     /// This will return a tuple of the cell width and height.
-    fn update_glyph_cache(
-        renderer: &mut Renderer,
+    fn update_font_size(
         glyph_cache: &mut GlyphCache,
         scale_factor: f64,
         config: &UiConfig,
         font: &Font,
     ) -> (f32, f32) {
-        renderer.with_loader(|mut api| {
-            let _ = glyph_cache.update_font_size(font, scale_factor, &mut api);
-        });
+        let _ = glyph_cache.update_font_size(font, scale_factor);
 
         // Compute new cell sizes.
         compute_cell_size(config, &glyph_cache.font_metrics())
     }
 
-    /// Clear glyph cache.
-    fn clear_glyph_cache(&mut self) {
+    /// Reset glyph cache.
+    fn reset_glyph_cache(&mut self) {
         let cache = &mut self.glyph_cache;
         self.renderer.with_loader(|mut api| {
-            cache.clear_glyph_cache(&mut api);
+            cache.reset_glyph_cache(&mut api);
         });
     }
 
     /// Process update events.
+    ///
+    /// XXX: this function must not call to any `OpenGL` related tasks. Only logical update
+    /// of the state is being performed here. Rendering update takes part right before the
+    /// actual rendering.
     pub fn handle_update<T>(
         &mut self,
         terminal: &mut Term<T>,
@@ -569,31 +665,29 @@ impl Display {
         let (mut cell_width, mut cell_height) =
             (self.size_info.cell_width(), self.size_info.cell_height());
 
-        // Ensure we're modifying the correct OpenGL context.
-        self.window.make_current();
+        if pending_update.font().is_some() || pending_update.cursor_dirty() {
+            let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
+            renderer_update.clear_font_cache = true
+        }
 
         // Update font size and cell dimensions.
         if let Some(font) = pending_update.font() {
             let scale_factor = self.window.scale_factor;
-            let cell_dimensions = Self::update_glyph_cache(
-                &mut self.renderer,
-                &mut self.glyph_cache,
-                scale_factor,
-                config,
-                font,
-            );
+            let cell_dimensions =
+                Self::update_font_size(&mut self.glyph_cache, scale_factor, config, font);
             cell_width = cell_dimensions.0;
             cell_height = cell_dimensions.1;
 
             info!("Cell size: {} x {}", cell_width, cell_height);
-        } else if pending_update.cursor_dirty() {
-            self.clear_glyph_cache();
         }
 
         let (mut width, mut height) = (self.size_info.width(), self.size_info.height());
         if let Some(dimensions) = pending_update.dimensions() {
             width = dimensions.width as f32;
             height = dimensions.height as f32;
+
+            let renderer_update = self.pending_renderer_update.get_or_insert(Default::default());
+            renderer_update.resize = true
         }
 
         let padding = config.window.padding(self.window.scale_factor);
@@ -610,22 +704,48 @@ impl Display {
 
         // Update number of column/lines in the viewport.
         let message_bar_lines =
-            message_buffer.message().map(|m| m.text(&self.size_info).len()).unwrap_or(0);
+            message_buffer.message().map_or(0, |m| m.text(&self.size_info).len());
         let search_lines = if search_active { 1 } else { 0 };
         self.size_info.reserve_lines(message_bar_lines + search_lines);
 
         // Resize PTY.
         pty_resize_handle.on_resize(self.size_info.into());
 
-        // Resize terminal.
-        terminal.resize(self.size_info);
-
         // Update cell size for graphic data
         terminal.update_cell_size(self.size_info.cell_width() as _, self.size_info.cell_height() as _);
 
+        // Resize terminal.
+        terminal.resize(self.size_info);
+    }
+
+    /// Update the state of the renderer.
+    ///
+    /// NOTE: The update to the renderer is split from the display update on purpose, since
+    /// on some platforms, like Wayland, resize and other OpenGL operations must be performed
+    /// right before rendering, otherwise they could lock the back buffer resulting in
+    /// rendering with the buffer of old size.
+    ///
+    /// This also resolves any flickering, since the resize is now synced with frame callbacks.
+    pub fn process_renderer_update(&mut self) {
+        let renderer_update = match self.pending_renderer_update.take() {
+            Some(renderer_update) => renderer_update,
+            _ => return,
+        };
+
         // Resize renderer.
-        let physical = PhysicalSize::new(self.size_info.width() as _, self.size_info.height() as _);
-        self.window.resize(physical);
+        if renderer_update.resize {
+            let physical =
+                PhysicalSize::new(self.size_info.width() as _, self.size_info.height() as _);
+            self.window.resize(physical);
+        }
+
+        // Ensure we're modifying the correct OpenGL context.
+        self.window.make_current();
+
+        if renderer_update.clear_font_cache {
+            self.reset_glyph_cache();
+        }
+
         self.renderer.resize(&self.size_info);
 
         if self.collect_damage() {
@@ -709,6 +829,7 @@ impl Display {
             grid_cells.push(cell);
         }
         let selection_range = content.selection_range();
+        let foreground_color = content.color(NamedColor::Foreground as usize);
         let background_color = content.color(NamedColor::Background as usize);
         let display_offset = content.display_offset();
         let cursor = content.cursor();
@@ -719,7 +840,7 @@ impl Display {
         let size_info = self.size_info;
 
         let vi_mode = terminal.mode().contains(TermMode::VI);
-        let vi_mode_cursor = if vi_mode { Some(terminal.vi_mode_cursor) } else { None };
+        let vi_cursor_point = if vi_mode { Some(terminal.vi_mode_cursor.point) } else { None };
 
         let graphics_queues = terminal.graphics_take_queues();
         if self.collect_damage() {
@@ -741,6 +862,10 @@ impl Display {
         let mut lines = RenderLines::new();
         let mut graphics_list = renderer::graphics::RenderList::default();
 
+        // Optimize loop hint comparator.
+        let has_highlighted_hint =
+            self.highlighted_hint.is_some() || self.vi_highlighted_hint.is_some();
+
         // Draw grid.
         {
             let _sampler = self.meter.sampler();
@@ -752,16 +877,26 @@ impl Display {
             let glyph_cache = &mut self.glyph_cache;
             let highlighted_hint = &self.highlighted_hint;
             let vi_highlighted_hint = &self.vi_highlighted_hint;
+
             self.renderer.draw_cells(
                 &size_info,
                 glyph_cache,
                 grid_cells.into_iter().map(|mut cell| {
                     // Underline hints hovered by mouse or vi mode cursor.
-                    let point = viewport_to_point(display_offset, cell.point);
-                    if highlighted_hint.as_ref().map_or(false, |h| h.bounds.contains(&point))
-                        || vi_highlighted_hint.as_ref().map_or(false, |h| h.bounds.contains(&point))
-                    {
-                        cell.flags.insert(Flags::UNDERLINE);
+                    let point = term::viewport_to_point(display_offset, cell.point);
+
+                    if has_highlighted_hint {
+                        let hyperlink =
+                            cell.extra.as_ref().and_then(|extra| extra.hyperlink.as_ref());
+                        if highlighted_hint
+                            .as_ref()
+                            .map_or(false, |hint| hint.should_highlight(point, hyperlink))
+                            || vi_highlighted_hint
+                                .as_ref()
+                                .map_or(false, |hint| hint.should_highlight(point, hyperlink))
+                        {
+                            cell.flags.insert(Flags::UNDERLINE);
+                        }
                     }
 
                     // Update underline/strikeout.
@@ -779,23 +914,20 @@ impl Display {
 
         let mut rects = lines.rects(&metrics, &size_info);
 
-        if let Some(vi_mode_cursor) = vi_mode_cursor {
+        if let Some(vi_cursor_point) = vi_cursor_point {
             // Indicate vi mode by showing the cursor's position in the top right corner.
-            let vi_point = vi_mode_cursor.point;
-            let line = (-vi_point.line.0 + size_info.bottommost_line().0) as usize;
-            let obstructed_column = Some(vi_point)
+            let line = (-vi_cursor_point.line.0 + size_info.bottommost_line().0) as usize;
+            let obstructed_column = Some(vi_cursor_point)
                 .filter(|point| point.line == -(display_offset as i32))
                 .map(|point| point.column);
-            self.draw_line_indicator(config, &size_info, total_lines, obstructed_column, line);
+            self.draw_line_indicator(config, total_lines, obstructed_column, line);
         } else if search_state.regex().is_some() {
             // Show current display offset in vi-less search to indicate match position.
-            self.draw_line_indicator(config, &size_info, total_lines, None, display_offset);
-        }
+            self.draw_line_indicator(config, total_lines, None, display_offset);
+        };
 
         // Draw cursor.
-        for rect in cursor.rects(&size_info, config.terminal_config.cursor.thickness()) {
-            rects.push(rect);
-        }
+        rects.extend(cursor.rects(&size_info, config.terminal_config.cursor.thickness()));
 
         // Push visual bell after url/underline/strikeout rects.
         let visual_bell_intensity = self.visual_bell.intensity();
@@ -809,6 +941,55 @@ impl Display {
                 visual_bell_intensity as f32,
             );
             rects.push(visual_bell_rect);
+        }
+
+        // Handle IME positioning and search bar rendering.
+        let ime_position = match search_state.regex() {
+            Some(regex) => {
+                let search_label = match search_state.direction() {
+                    Direction::Right => FORWARD_SEARCH_LABEL,
+                    Direction::Left => BACKWARD_SEARCH_LABEL,
+                };
+
+                let search_text = Self::format_search(regex, search_label, size_info.columns());
+
+                // Render the search bar.
+                self.draw_search(config, &search_text);
+
+                // Draw search bar cursor.
+                let line = size_info.screen_lines();
+                let column = Column(search_text.chars().count() - 1);
+
+                // Add cursor to search bar if IME is not active.
+                if self.ime.preedit().is_none() {
+                    let fg = config.colors.footer_bar_foreground();
+                    let shape = CursorShape::Underline;
+                    let cursor = RenderableCursor::new(Point::new(line, column), shape, fg, false);
+                    rects.extend(
+                        cursor.rects(&size_info, config.terminal_config.cursor.thickness()),
+                    );
+                }
+
+                Some(Point::new(line, column))
+            },
+            None => {
+                let num_lines = self.size_info.screen_lines();
+                term::point_to_viewport(display_offset, cursor_point)
+                    .filter(|point| point.line < num_lines)
+            },
+        };
+
+        // Handle IME.
+        if self.ime.is_enabled() {
+            if let Some(point) = ime_position {
+                let (fg, bg) = if search_state.regex().is_some() {
+                    (config.colors.footer_bar_foreground(), config.colors.footer_bar_background())
+                } else {
+                    (foreground_color, background_color)
+                };
+
+                self.draw_ime_preview(point, fg, bg, &mut rects, config);
+            }
         }
 
         if self.debug_damage {
@@ -842,37 +1023,27 @@ impl Display {
             let fg = config.colors.primary.background;
             for (i, message_text) in text.iter().enumerate() {
                 let point = Point::new(start_line + i, Column(0));
-                self.renderer.draw_string(point, fg, bg, message_text, &size_info, glyph_cache);
+                self.renderer.draw_string(
+                    point,
+                    fg,
+                    bg,
+                    message_text.chars(),
+                    &size_info,
+                    glyph_cache,
+                );
             }
         } else {
             // Draw rectangles.
             self.renderer.draw_rects(&size_info, &metrics, rects);
         }
 
-        self.draw_render_timer(config, &size_info);
+        self.draw_render_timer(config);
 
-        // Handle search and IME positioning.
-        let ime_position = match search_state.regex() {
-            Some(regex) => {
-                let search_label = match search_state.direction() {
-                    Direction::Right => FORWARD_SEARCH_LABEL,
-                    Direction::Left => BACKWARD_SEARCH_LABEL,
-                };
-
-                let search_text = Self::format_search(&size_info, regex, search_label);
-
-                // Render the search bar.
-                self.draw_search(config, &size_info, &search_text);
-
-                // Compute IME position.
-                let line = Line(size_info.screen_lines() as i32 + 1);
-                Point::new(line, Column(search_text.chars().count() - 1))
-            },
-            None => cursor_point,
-        };
-
-        // Update IME position.
-        self.window.update_ime_position(ime_position, &self.size_info);
+        // Draw hyperlink uri preview.
+        if has_highlighted_hint {
+            let cursor_point = vi_cursor_point.or(Some(cursor_point));
+            self.draw_hyperlink_preview(config, cursor_point, display_offset);
+        }
 
         // Frame event should be requested before swaping buffers, since it requires surface
         // `commit`, which is done by swap buffers under the hood.
@@ -895,6 +1066,9 @@ impl Display {
         }
 
         self.damage_rects.clear();
+
+        // Append damage rects we've enqueued for the next frame.
+        mem::swap(&mut self.damage_rects, &mut self.next_frame_damage_rects);
     }
 
     /// Update to a new configuration.
@@ -938,8 +1112,13 @@ impl Display {
 
         // Update cursor shape.
         if highlighted_hint.is_some() {
+            // If mouse changed the line, we should update the hyperlink preview, since the
+            // highlighted hint could be disrupted by the old preview.
+            dirty = self.hint_mouse_point.map_or(false, |p| p.line != point.line);
+            self.hint_mouse_point = Some(point);
             self.window.set_mouse_cursor(CursorIcon::Hand);
         } else if self.highlighted_hint.is_some() {
+            self.hint_mouse_point = None;
             if term.mode().intersects(TermMode::MOUSE_MODE) && !term.mode().contains(TermMode::VI) {
                 self.window.set_mouse_cursor(CursorIcon::Default);
             } else {
@@ -953,75 +1132,239 @@ impl Display {
         dirty
     }
 
-    /// Format search regex to account for the cursor and fullwidth characters.
-    fn format_search(size_info: &SizeInfo, search_regex: &str, search_label: &str) -> String {
-        // Add spacers for wide chars.
-        let mut formatted_regex = String::with_capacity(search_regex.len());
-        for c in search_regex.chars() {
-            formatted_regex.push(c);
-            if c.width() == Some(2) {
-                formatted_regex.push(' ');
-            }
+    #[inline(never)]
+    fn draw_ime_preview(
+        &mut self,
+        point: Point<usize>,
+        fg: Rgb,
+        bg: Rgb,
+        rects: &mut Vec<RenderRect>,
+        config: &UiConfig,
+    ) {
+        let preedit = match self.ime.preedit() {
+            Some(preedit) => preedit,
+            None => {
+                // In case we don't have preedit, just set the popup point.
+                self.window.update_ime_position(point, &self.size_info);
+                return;
+            },
+        };
+
+        let num_cols = self.size_info.columns();
+
+        // Get the visible preedit.
+        let visible_text: String = match (preedit.cursor_byte_offset, preedit.cursor_end_offset) {
+            (Some(byte_offset), Some(end_offset)) if end_offset > num_cols => StrShortener::new(
+                &preedit.text[byte_offset..],
+                num_cols,
+                ShortenDirection::Right,
+                Some(SHORTENER),
+            ),
+            _ => {
+                StrShortener::new(&preedit.text, num_cols, ShortenDirection::Left, Some(SHORTENER))
+            },
+        }
+        .collect();
+
+        let visible_len = visible_text.chars().count();
+
+        let end = cmp::min(point.column.0 + visible_len, num_cols);
+        let start = end.saturating_sub(visible_len);
+
+        let start = Point::new(point.line, Column(start));
+        let end = Point::new(point.line, Column(end - 1));
+
+        let glyph_cache = &mut self.glyph_cache;
+        let metrics = glyph_cache.font_metrics();
+
+        self.renderer.draw_string(
+            start,
+            fg,
+            bg,
+            visible_text.chars(),
+            &self.size_info,
+            glyph_cache,
+        );
+
+        if self.collect_damage() {
+            let damage = self.damage_from_point(Point::new(start.line, Column(0)), num_cols as u32);
+            self.damage_rects.push(damage);
+            self.next_frame_damage_rects.push(damage);
         }
 
-        // Add cursor to show whitespace.
-        formatted_regex.push('_');
+        // Add underline for preedit text.
+        let underline = RenderLine { start, end, color: fg };
+        rects.extend(underline.rects(Flags::UNDERLINE, &metrics, &self.size_info));
 
-        // Truncate beginning of the search regex if it exceeds the viewport width.
-        let num_cols = size_info.columns();
-        let label_len = search_label.chars().count();
-        let regex_len = formatted_regex.chars().count();
-        let truncate_len = cmp::min((regex_len + label_len).saturating_sub(num_cols), regex_len);
-        let index = formatted_regex.char_indices().nth(truncate_len).map(|(i, _c)| i).unwrap_or(0);
-        let truncated_regex = &formatted_regex[index..];
+        let ime_popup_point = match preedit.cursor_end_offset {
+            Some(cursor_end_offset) if cursor_end_offset != 0 => {
+                let is_wide = preedit.text[preedit.cursor_byte_offset.unwrap_or_default()..]
+                    .chars()
+                    .next()
+                    .map(|ch| ch.width() == Some(2))
+                    .unwrap_or_default();
 
-        // Add search label to the beginning of the search regex.
-        let mut bar_text = format!("{}{}", search_label, truncated_regex);
+                let cursor_column = Column(
+                    (end.column.0 as isize - cursor_end_offset as isize + 1).max(0) as usize,
+                );
+                let cursor_point = Point::new(point.line, cursor_column);
+                let cursor =
+                    RenderableCursor::new(cursor_point, CursorShape::HollowBlock, fg, is_wide);
+                rects.extend(
+                    cursor.rects(&self.size_info, config.terminal_config.cursor.thickness()),
+                );
+                cursor_point
+            },
+            _ => end,
+        };
 
-        // Make sure the label alone doesn't exceed the viewport width.
-        bar_text.truncate(num_cols);
+        self.window.update_ime_position(ime_popup_point, &self.size_info);
+    }
+
+    /// Format search regex to account for the cursor and fullwidth characters.
+    fn format_search(search_regex: &str, search_label: &str, max_width: usize) -> String {
+        let label_len = search_label.len();
+
+        // Skip `search_regex` formatting if only label is visible.
+        if label_len > max_width {
+            return search_label[..max_width].to_owned();
+        }
+
+        // The search string consists of `search_label` + `search_regex` + `cursor`.
+        let mut bar_text = String::from(search_label);
+        bar_text.extend(StrShortener::new(
+            search_regex,
+            max_width.wrapping_sub(label_len + 1),
+            ShortenDirection::Left,
+            Some(SHORTENER),
+        ));
+
+        // Add place for cursor.
+        bar_text.push(' ');
 
         bar_text
     }
 
-    /// Draw current search regex.
-    fn draw_search(&mut self, config: &UiConfig, size_info: &SizeInfo, text: &str) {
-        let glyph_cache = &mut self.glyph_cache;
-        let num_cols = size_info.columns();
+    /// Draw preview for the currently highlighted `Hyperlink`.
+    #[inline(never)]
+    fn draw_hyperlink_preview(
+        &mut self,
+        config: &UiConfig,
+        cursor_point: Option<Point>,
+        display_offset: usize,
+    ) {
+        let num_cols = self.size_info.columns();
+        let uris: Vec<_> = self
+            .highlighted_hint
+            .iter()
+            .chain(&self.vi_highlighted_hint)
+            .filter_map(|hint| hint.hyperlink().map(|hyperlink| hyperlink.uri()))
+            .map(|uri| StrShortener::new(uri, num_cols, ShortenDirection::Right, Some(SHORTENER)))
+            .collect();
 
+        if uris.is_empty() {
+            return;
+        }
+
+        // The maximum amount of protected lines including the ones we'll show preview on.
+        let max_protected_lines = uris.len() * 2;
+
+        // Lines we shouldn't shouldn't show preview on, because it'll obscure the highlighted
+        // hint.
+        let mut protected_lines = Vec::with_capacity(max_protected_lines);
+        if self.size_info.screen_lines() >= max_protected_lines {
+            // Prefer to show preview even when it'll likely obscure the highlighted hint, when
+            // there's no place left for it.
+            protected_lines.push(self.hint_mouse_point.map(|point| point.line));
+            protected_lines.push(cursor_point.map(|point| point.line));
+        }
+
+        // Find the line in viewport we can draw preview on without obscuring protected lines.
+        let viewport_bottom = self.size_info.bottommost_line() - Line(display_offset as i32);
+        let viewport_top = viewport_bottom - (self.size_info.screen_lines() - 1);
+        let uri_lines = (viewport_top.0..=viewport_bottom.0)
+            .rev()
+            .map(|line| Some(Line(line)))
+            .filter_map(|line| {
+                if protected_lines.contains(&line) {
+                    None
+                } else {
+                    protected_lines.push(line);
+                    line
+                }
+            })
+            .take(uris.len())
+            .flat_map(|line| term::point_to_viewport(display_offset, Point::new(line, Column(0))));
+
+        let fg = config.colors.footer_bar_foreground();
+        let bg = config.colors.footer_bar_background();
+        for (uri, point) in uris.into_iter().zip(uri_lines) {
+            // Damage the uri preview.
+            if self.collect_damage() {
+                let uri_preview_damage = self.damage_from_point(point, num_cols as u32);
+                self.damage_rects.push(uri_preview_damage);
+
+                // Damage the uri preview for the next frame as well.
+                self.next_frame_damage_rects.push(uri_preview_damage);
+            }
+
+            self.renderer.draw_string(point, fg, bg, uri, &self.size_info, &mut self.glyph_cache);
+        }
+    }
+
+    /// Draw current search regex.
+    #[inline(never)]
+    fn draw_search(&mut self, config: &UiConfig, text: &str) {
         // Assure text length is at least num_cols.
+        let num_cols = self.size_info.columns();
         let text = format!("{:<1$}", text, num_cols);
 
-        let point = Point::new(size_info.screen_lines(), Column(0));
-        let fg = config.colors.search_bar_foreground();
-        let bg = config.colors.search_bar_background();
+        let point = Point::new(self.size_info.screen_lines(), Column(0));
 
-        self.renderer.draw_string(point, fg, bg, &text, size_info, glyph_cache);
+        let fg = config.colors.footer_bar_foreground();
+        let bg = config.colors.footer_bar_background();
+
+        self.renderer.draw_string(
+            point,
+            fg,
+            bg,
+            text.chars(),
+            &self.size_info,
+            &mut self.glyph_cache,
+        );
     }
 
     /// Draw render timer.
-    fn draw_render_timer(&mut self, config: &UiConfig, size_info: &SizeInfo) {
+    #[inline(never)]
+    fn draw_render_timer(&mut self, config: &UiConfig) {
         if !config.debug.render_timer {
             return;
         }
 
         let timing = format!("{:.3} usec", self.meter.average());
-        let point = Point::new(size_info.screen_lines().saturating_sub(2), Column(0));
+        let point = Point::new(self.size_info.screen_lines().saturating_sub(2), Column(0));
         let fg = config.colors.primary.background;
         let bg = config.colors.normal.red;
 
-        // Damage the entire line.
-        self.damage_from_point(point, self.size_info.columns() as u32);
+        if self.collect_damage() {
+            // Damage the entire line.
+            let render_timer_damage =
+                self.damage_from_point(point, self.size_info.columns() as u32);
+            self.damage_rects.push(render_timer_damage);
+
+            // Damage the render timer for the next frame.
+            self.next_frame_damage_rects.push(render_timer_damage)
+        }
 
         let glyph_cache = &mut self.glyph_cache;
-        self.renderer.draw_string(point, fg, bg, &timing, size_info, glyph_cache);
+        self.renderer.draw_string(point, fg, bg, timing.chars(), &self.size_info, glyph_cache);
     }
 
     /// Draw an indicator for the position of a line in history.
+    #[inline(never)]
     fn draw_line_indicator(
         &mut self,
         config: &UiConfig,
-        size_info: &SizeInfo,
         total_lines: usize,
         obstructed_column: Option<Column>,
         line: usize,
@@ -1038,14 +1381,16 @@ impl Display {
         }
 
         let text = format!("[{}/{}]", line, total_lines - 1);
-        let column = Column(size_info.columns().saturating_sub(text.len()));
+        let column = Column(self.size_info.columns().saturating_sub(text.len()));
         let point = Point::new(0, column);
 
         // Damage the maximum possible length of the format text, which could be achieved when
         // using `MAX_SCROLLBACK_LINES` as current and total lines adding a `3` for formatting.
         const MAX_SIZE: usize = 2 * num_digits(MAX_SCROLLBACK_LINES) + 3;
-        let damage_point = Point::new(0, Column(size_info.columns().saturating_sub(MAX_SIZE)));
-        self.damage_from_point(damage_point, MAX_SIZE as u32);
+        let damage_point = Point::new(0, Column(self.size_info.columns().saturating_sub(MAX_SIZE)));
+        if self.collect_damage() {
+            self.damage_rects.push(self.damage_from_point(damage_point, MAX_SIZE as u32));
+        }
 
         let colors = &config.colors;
         let fg = colors.line_indicator.foreground.unwrap_or(colors.primary.background);
@@ -1054,33 +1399,34 @@ impl Display {
         // Do not render anything if it would obscure the vi mode cursor.
         if obstructed_column.map_or(true, |obstructed_column| obstructed_column < column) {
             let glyph_cache = &mut self.glyph_cache;
-            self.renderer.draw_string(point, fg, bg, &text, size_info, glyph_cache);
+            self.renderer.draw_string(point, fg, bg, text.chars(), &self.size_info, glyph_cache);
         }
     }
 
     /// Damage `len` starting from a `point`.
-    #[inline]
-    fn damage_from_point(&mut self, point: Point<usize>, len: u32) {
-        if !self.collect_damage() {
-            return;
-        }
-
+    ///
+    /// This method also enqueues damage for the next frame automatically.
+    fn damage_from_point(&self, point: Point<usize>, len: u32) -> DamageRect {
         let size_info: SizeInfo<u32> = self.size_info.into();
         let x = size_info.padding_x() + point.column.0 as u32 * size_info.cell_width();
         let y_top = size_info.height() - size_info.padding_y();
         let y = y_top - (point.line as u32 + 1) * size_info.cell_height();
         let width = len as u32 * size_info.cell_width();
-        self.damage_rects.push(DamageRect { x, y, width, height: size_info.cell_height() })
+        DamageRect { x, y, width, height: size_info.cell_height() }
     }
 
     /// Damage currently highlighted `Display` hints.
     #[inline]
     fn damage_highlighted_hints<T: EventListener>(&self, terminal: &mut Term<T>) {
         let display_offset = terminal.grid().display_offset();
+        let last_visible_line = terminal.screen_lines() - 1;
         for hint in self.highlighted_hint.iter().chain(&self.vi_highlighted_hint) {
-            for point in (hint.bounds.start().line.0..=hint.bounds.end().line.0).flat_map(|line| {
-                point_to_viewport(display_offset, Point::new(Line(line), Column(0)))
-            }) {
+            for point in
+                (hint.bounds().start().line.0..=hint.bounds().end().line.0).flat_map(|line| {
+                    term::point_to_viewport(display_offset, Point::new(Line(line), Column(0)))
+                        .filter(|point| point.line <= last_visible_line)
+                })
+            {
                 terminal.damage_line(point.line, 0, terminal.columns() - 1);
             }
         }
@@ -1134,20 +1480,6 @@ impl Drop for Display {
         // contexts might be deleted.
         self.window.make_current()
     }
-}
-
-/// Convert a terminal point to a viewport relative point.
-#[inline]
-pub fn point_to_viewport(display_offset: usize, point: Point) -> Option<Point<usize>> {
-    let viewport_line = point.line.0 + display_offset as i32;
-    usize::try_from(viewport_line).ok().map(|line| Point::new(line, point.column))
-}
-
-/// Convert a viewport relative point to a terminal point.
-#[inline]
-pub fn viewport_to_point(display_offset: usize, point: Point<usize>) -> Point {
-    let line = Line(point.line as i32) - display_offset;
-    Point::new(line, point.column)
 }
 
 /// Calculate the cell dimensions based on font metrics.
