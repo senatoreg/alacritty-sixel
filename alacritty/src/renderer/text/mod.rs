@@ -91,6 +91,8 @@ pub trait TextRenderer<'a> {
 
         func(self.loader_api())
     }
+
+    fn deactivate_tex(&mut self);
 }
 
 pub trait TextRenderBatch {

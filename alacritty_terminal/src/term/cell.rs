@@ -5,6 +5,7 @@ use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
 use crate::ansi::{Color, NamedColor};
+use crate::graphics::GraphicCell;
 use crate::grid::{self, GridCell};
 use crate::index::Column;
 
@@ -28,6 +29,7 @@ bitflags! {
         const UNDERCURL                 = 0b0001_0000_0000_0000;
         const DOTTED_UNDERLINE          = 0b0010_0000_0000_0000;
         const DASHED_UNDERLINE          = 0b0100_0000_0000_0000;
+        const GRAPHICS                  = 0b1000_0000_0000_0000;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits | Self::DOUBLE_UNDERLINE.bits
                                         | Self::UNDERCURL.bits | Self::DOTTED_UNDERLINE.bits
                                         | Self::DASHED_UNDERLINE.bits;
@@ -107,6 +109,9 @@ impl ResetDiscriminant<Color> for Cell {
 #[derive(Serialize, Deserialize, Default, Debug, Clone, Eq, PartialEq)]
 pub struct CellExtra {
     zerowidth: Vec<char>,
+
+    #[serde(skip)]
+    graphic: Option<Box<GraphicCell>>,
 
     underline_color: Option<Color>,
 
@@ -202,6 +207,21 @@ impl Cell {
     pub fn hyperlink(&self) -> Option<Hyperlink> {
         self.extra.as_ref()?.hyperlink.clone()
     }
+
+    /// Graphic present in the cell.
+    #[inline]
+    pub fn graphic(&self) -> Option<&GraphicCell> {
+        self.extra.as_deref().and_then(|extra| extra.graphic.as_deref())
+    }
+
+    /// Write the graphic data in the cell.
+    #[inline]
+    pub fn set_graphic(&mut self, graphic_cell: GraphicCell) {
+        let extra = self.extra.get_or_insert_with(Default::default);
+        Arc::make_mut(extra).graphic = Some(Box::new(graphic_cell));
+
+        self.flags_mut().insert(Flags::GRAPHICS);
+    }
 }
 
 impl GridCell for Cell {
@@ -216,7 +236,8 @@ impl GridCell for Cell {
                     | Flags::STRIKEOUT
                     | Flags::WRAPLINE
                     | Flags::WIDE_CHAR_SPACER
-                    | Flags::LEADING_WIDE_CHAR_SPACER,
+                    | Flags::LEADING_WIDE_CHAR_SPACER
+                    | Flags::GRAPHICS,
             )
             && self.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) != Some(false)
     }

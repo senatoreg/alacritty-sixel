@@ -655,6 +655,9 @@ impl Display {
         // Resize PTY.
         pty_resize_handle.on_resize(new_size.into());
 
+        // Update cell size for graphic data
+        terminal.update_cell_size(self.size_info.cell_width() as _, self.size_info.cell_height() as _);
+
         // Resize terminal.
         terminal.resize(new_size);
 
@@ -787,6 +790,7 @@ impl Display {
         let vi_mode = terminal.mode().contains(TermMode::VI);
         let vi_cursor_point = if vi_mode { Some(terminal.vi_mode_cursor.point) } else { None };
 
+        let graphics_queues = terminal.graphics_take_queues();
         if self.collect_damage() {
             self.update_damage(&mut terminal, selection_range, search_state);
         }
@@ -798,7 +802,13 @@ impl Display {
         self.make_current();
 
         self.renderer.clear(background_color, config.window_opacity());
+
+        if let Some(graphics_queues) = graphics_queues {
+            self.renderer.graphics_run_updates(graphics_queues, &size_info);
+        }
+
         let mut lines = RenderLines::new();
+        let mut graphics_list = renderer::graphics::RenderList::default();
 
         // Optimize loop hint comparator.
         let has_highlighted_hint =
@@ -840,10 +850,15 @@ impl Display {
                     // Update underline/strikeout.
                     lines.update(&cell);
 
+                    // Track any graphic present in the cell.
+                    graphics_list.update(&cell);
+
                     cell
                 }),
             );
         }
+
+        self.renderer.graphics_draw(graphics_list, &size_info);
 
         let mut rects = lines.rects(&metrics, &size_info);
 
