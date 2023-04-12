@@ -124,7 +124,7 @@ impl Renderer {
             None => (version.as_ref() >= "3.3" && !is_gles_context, true),
         };
 
-        let (text_renderer, rect_renderer) = if use_glsl3 {
+        let (text_renderer, rect_renderer, graphics_renderer) = if use_glsl3 {
             let text_renderer = TextRendererProvider::Glsl3(Glsl3Renderer::new()?);
             let rect_renderer = RectRenderer::new(ShaderVersion::Glsl3)?;
             let graphics_renderer = GraphicsRenderer::new(ShaderVersion::Glsl3)?;
