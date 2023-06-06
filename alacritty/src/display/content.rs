@@ -4,6 +4,7 @@ use std::{cmp, mem};
 
 use alacritty_terminal::ansi::{Color, CursorShape, NamedColor};
 use alacritty_terminal::event::EventListener;
+use alacritty_terminal::graphics::GraphicCell;
 use alacritty_terminal::grid::Indexed;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
@@ -196,6 +197,7 @@ pub struct RenderableCell {
 pub struct RenderableCellExtra {
     pub zerowidth: Option<Vec<char>>,
     pub hyperlink: Option<Hyperlink>,
+    pub graphic: Option<GraphicCell>,
 }
 
 impl RenderableCell {
@@ -267,11 +269,13 @@ impl RenderableCell {
 
         let zerowidth = cell.zerowidth();
         let hyperlink = cell.hyperlink();
+        let graphic = cell.graphic();
 
-        let extra = (zerowidth.is_some() || hyperlink.is_some()).then(|| {
+        let extra = (zerowidth.is_some() || hyperlink.is_some() || graphic.is_some()).then(|| {
             Box::new(RenderableCellExtra {
                 zerowidth: zerowidth.map(|zerowidth| zerowidth.to_vec()),
                 hyperlink,
+                graphic: graphic.cloned(),
             })
         });
 
