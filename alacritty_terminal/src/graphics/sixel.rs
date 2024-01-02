@@ -23,7 +23,7 @@ use std::fmt;
 use std::mem;
 
 use crate::graphics::{ColorType, GraphicData, GraphicId, MAX_GRAPHIC_DIMENSIONS};
-use crate::term::color::Rgb;
+use crate::vte::ansi::Rgb;
 
 use log::trace;
 use vte::Params;

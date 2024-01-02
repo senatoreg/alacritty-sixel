@@ -397,7 +397,6 @@ pub enum Osc52 {
     OnlyPaste,
     /// Both are accepted.
     CopyPaste,
->>>>>>> v0.13.0
 }
 
 impl<T> Term<T> {
@@ -2112,7 +2111,6 @@ impl<T: EventListener> Handler for Term<T> {
         match mode {
             NamedMode::Insert => self.mode.insert(TermMode::INSERT),
             NamedMode::LineFeedNewLine => self.mode.insert(TermMode::LINE_FEED_NEW_LINE),
->>>>>>> v0.13.0
         }
     }
 

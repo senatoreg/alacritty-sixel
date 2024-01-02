@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::term::color::Rgb;
+use crate::vte::ansi::Rgb;
 
 /// Max allowed dimensions (width, height) for the graphic, in pixels.
 pub const MAX_GRAPHIC_DIMENSIONS: [usize; 2] = [4096, 4096];
