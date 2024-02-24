@@ -5,26 +5,6 @@ The sections should follow the order `Packaging`, `Added`, `Changed`, `Fixed` an
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## 0.14.0-dev
-
-### Added
-
-- Default `Home`/`End` bindings in Vi mode mapped to `First`/`Last` respectively
-
-### Fixed
-
-- CLI env variables clearing configuration file variables
-- Vi inline search/semantic selection expanding across newlines
-- C0 and C1 codes being emitted in associated text when using kitty keyboard
-- Occasional hang on startup with some Wayland compositors
-- Missing key for `NumpadDecimal` in key bindings
-
-### Changed
-
-- No unused-key warnings will be emitted for OS-specific config keys
-- Use built-in font for sextant symbols from `U+1FB00` to `U+1FB3B`
-- Kitty encoding is not used anymore for uncommon keys unless the protocol enabled
-
 ## 0.13.1
 
 ### Added
