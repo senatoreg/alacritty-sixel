@@ -1,6 +1,6 @@
 [package]
 name = "alacritty_terminal"
-version = "0.21.0"
+version = "0.23.0"
 authors = ["Christian Duerr <contact@christianduerr.com>", "Joe Wilm <joe@jwilm.com>"]
 license = "Apache-2.0"
 description = "Library for writing terminal emulators"
@@ -14,7 +14,7 @@ default = ["serde"]
 serde = ["dep:serde", "bitflags/serde", "vte/serde"]
 
 [dependencies]
-base64 = "0.21.3"
+base64 = "0.22.0"
 bitflags = "2.4.1"
 home = "0.5.5"
 libc = "0.2"
