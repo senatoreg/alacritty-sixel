@@ -127,9 +127,6 @@ impl ResetDiscriminant<Color> for Cell {
 pub struct CellExtra {
     zerowidth: Vec<char>,
 
-    #[serde(skip)]
-    graphic: Option<Box<GraphicCell>>,
-
     underline_color: Option<Color>,
 
     hyperlink: Option<Hyperlink>,
@@ -254,21 +251,6 @@ impl Cell {
     #[inline]
     pub fn hyperlink(&self) -> Option<Hyperlink> {
         self.extra.as_ref()?.hyperlink.clone()
-    }
-
-    /// Graphic present in the cell.
-    #[inline]
-    pub fn graphic(&self) -> Option<&GraphicCell> {
-        self.extra.as_deref().and_then(|extra| extra.graphic.as_deref())
-    }
-
-    /// Write the graphic data in the cell.
-    #[inline]
-    pub fn set_graphic(&mut self, graphic_cell: GraphicCell) {
-        let extra = self.extra.get_or_insert_with(Default::default);
-        Arc::make_mut(extra).graphic = Some(Box::new(graphic_cell));
-
-        self.flags_mut().insert(Flags::GRAPHICS);
     }
 }
 

@@ -12,15 +12,11 @@ use base64::Engine;
 use bitflags::bitflags;
 use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
-use vte::Params;
 
 use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
-use crate::graphics::{
-    sixel, GraphicCell, GraphicData, Graphics, TextureRef, UpdateQueues, MAX_GRAPHIC_DIMENSIONS,
-};
 use crate::term::cell::{Cell, Flags, LineLength};
 use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
@@ -90,9 +86,6 @@ bitflags! {
                                       | Self::REPORT_ALTERNATE_KEYS.bits()
                                       | Self::REPORT_ALL_KEYS_AS_ESC.bits()
                                       | Self::REPORT_ASSOCIATED_TEXT.bits();
-        const SIXEL_DISPLAY       = 0b0100_0000_0000_0000_0000;
-        const SIXEL_PRIV_PALETTE  = 0b1000_0000_0000_0000_0000;
-        const SIXEL_CURSOR_TO_THE_RIGHT  = 0b0001_0000_0000_0000_0000_0000;
          const ANY                    = u32::MAX;
 
         const SIXEL_DISPLAY             = 1 << 28;
@@ -343,10 +336,6 @@ pub struct Term<T> {
     /// Information about damaged cells.
     damage: TermDamageState,
 
-    /// For graphic data
-    cell_width: usize,
-    cell_height: usize,
-
     /// Config directly for the terminal.
     config: Config,
 }
@@ -463,8 +452,6 @@ impl<T> Term<T> {
             selection: None,
             graphics: Graphics::new(dimensions),
             damage,
-            cell_width: 0,
-            cell_height: 0,
             config: options,
         }
     }
@@ -1292,7 +1279,7 @@ impl<T: EventListener> Handler for Term<T> {
         match intermediate {
             None => {
                 trace!("Reporting primary device attributes");
-                let text = String::from("\x1b[?4;6c");
+                let text = String::from("\x1b[?6c");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             },
             Some('>') => {
@@ -2013,13 +2000,6 @@ impl<T: EventListener> Handler for Term<T> {
                 style.blinking = true;
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             },
-            NamedPrivateMode::SixelDisplay => self.mode.insert(TermMode::SIXEL_DISPLAY),
-            NamedPrivateMode::SixelPrivateColorRegisters => {
-                self.mode.insert(TermMode::SIXEL_PRIV_PALETTE)
-            },
-            NamedPrivateMode::SixelCursorToTheRight => {
-                self.mode.insert(TermMode::SIXEL_CURSOR_TO_THE_RIGHT);
-            },
             NamedPrivateMode::SyncUpdate => (),
         }
     }
@@ -2177,14 +2157,6 @@ impl<T: EventListener> Handler for Term<T> {
             NamedMode::Insert => {
                 self.mode.remove(TermMode::INSERT);
                 self.mark_fully_damaged();
-            },
-            NamedMode::SixelDisplay => self.mode.remove(TermMode::SIXEL_DISPLAY),
-            NamedMode::SixelPrivateColorRegisters => {
-                self.graphics.sixel_shared_palette = None;
-                self.mode.remove(TermMode::SIXEL_PRIV_PALETTE);
-            },
-            NamedMode::SixelCursorToTheRight => {
-                self.mode.remove(TermMode::SIXEL_CURSOR_TO_THE_RIGHT)
             },
             NamedMode::LineFeedNewLine => self.mode.remove(TermMode::LINE_FEED_NEW_LINE),
         }

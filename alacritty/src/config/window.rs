@@ -53,9 +53,6 @@ pub struct WindowConfig {
     /// Resize increments.
     pub resize_increments: bool,
 
-    /// Resize increments.
-    pub resize_increments: bool,
-
     /// Pixel padding.
     padding: Delta<u16>,
 

@@ -298,7 +298,6 @@ impl RenderableCell {
 
         let zerowidth = cell.zerowidth();
         let hyperlink = cell.hyperlink();
-        let graphic = cell.graphic();
 
         let graphics = cell.graphics().map(|graphics| {
             graphics

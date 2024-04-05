@@ -27,7 +27,6 @@ use crate::renderer::shader::ShaderError;
 
 pub mod graphics;
 pub mod platform;
-pub mod graphics;
 pub mod rects;
 mod shader;
 mod text;

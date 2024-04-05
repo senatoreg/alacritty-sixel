@@ -799,11 +799,6 @@ impl Display {
         }
 
         self.renderer.clear(background_color, config.window_opacity());
-
-        if let Some(graphics_queues) = graphics_queues {
-            self.renderer.graphics_run_updates(graphics_queues, &size_info);
-        }
-
         let mut lines = RenderLines::new();
         let mut graphics_list = renderer::graphics::RenderList::default();
 
@@ -861,8 +856,6 @@ impl Display {
                 }),
             );
         }
-
-        self.renderer.graphics_draw(graphics_list, &size_info);
 
         let mut rects = lines.rects(&metrics, &size_info);
 
