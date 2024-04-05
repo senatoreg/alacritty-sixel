@@ -195,7 +195,7 @@ impl<'a> TextRenderer<'a> for Glsl3Renderer {
         }
     }
 
-    fn deactivate_tex(&mut self) {
+    fn reset_active_tex(&mut self) {
         self.active_tex = 0;
     }
 }

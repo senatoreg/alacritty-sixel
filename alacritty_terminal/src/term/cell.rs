@@ -5,7 +5,7 @@ use bitflags::bitflags;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::graphics::GraphicCell;
+use crate::graphics::GraphicsCell;
 use crate::grid::{self, GridCell};
 use crate::index::Column;
 use crate::vte::ansi::{Color, Hyperlink as VteHyperlink, NamedColor};
@@ -133,6 +133,9 @@ pub struct CellExtra {
     underline_color: Option<Color>,
 
     hyperlink: Option<Hyperlink>,
+
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    graphics: Option<GraphicsCell>,
 }
 
 /// Content and attributes of a single cell in the terminal grid.
@@ -171,6 +174,33 @@ impl Cell {
     pub fn push_zerowidth(&mut self, character: char) {
         let extra = self.extra.get_or_insert(Default::default());
         Arc::make_mut(extra).zerowidth.push(character);
+    }
+
+    /// Graphic present in the cell.
+    #[inline]
+    pub fn graphics(&self) -> Option<&GraphicsCell> {
+        self.extra.as_deref().and_then(|extra| extra.graphics.as_ref())
+    }
+
+    /// Extract the graphics value from the cell.
+    #[inline]
+    pub fn take_graphics(&mut self) -> Option<GraphicsCell> {
+        if let Some(extra) = &mut self.extra {
+            if extra.graphics.is_some() {
+                return Arc::make_mut(extra).graphics.take();
+            }
+        }
+
+        None
+    }
+
+    /// Write the graphic data in the cell.
+    #[inline]
+    pub fn set_graphics(&mut self, graphics_cell: GraphicsCell) {
+        let extra = self.extra.get_or_insert_with(Default::default);
+        Arc::make_mut(extra).graphics = Some(graphics_cell);
+
+        self.flags_mut().insert(Flags::GRAPHICS);
     }
 
     /// Remove all wide char data from a cell.

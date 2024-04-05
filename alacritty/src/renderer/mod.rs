@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::{fmt, ptr};
 
 use ahash::RandomState;
@@ -9,7 +10,6 @@ use crossfont::Metrics;
 use glutin::context::{ContextApi, GlContext, PossiblyCurrentContext};
 use glutin::display::{GetGlDisplay, GlDisplay};
 use log::{debug, error, info, warn, LevelFilter};
-use once_cell::sync::OnceCell;
 use unicode_width::UnicodeWidthChar;
 
 use alacritty_terminal::graphics::UpdateQueues;
@@ -25,6 +25,7 @@ use crate::renderer::graphics::GraphicsRenderer;
 use crate::renderer::rects::{RectRenderer, RenderRect};
 use crate::renderer::shader::ShaderError;
 
+pub mod graphics;
 pub mod platform;
 pub mod graphics;
 pub mod rects;
@@ -181,7 +182,7 @@ impl Renderer {
             }
         }
 
-        Ok(Self { text_renderer, rect_renderer })
+        Ok(Self { text_renderer, rect_renderer, graphics_renderer })
     }
 
     pub fn draw_cells<I: Iterator<Item = RenderableCell>>(
@@ -319,16 +320,32 @@ impl Renderer {
     /// Run the required actions to apply changes for the graphics in the grid.
     #[inline]
     pub fn graphics_run_updates(&mut self, update_queues: UpdateQueues, size_info: &SizeInfo) {
-        self.graphics_renderer.run_updates(update_queues, size_info);
+        let result = self.graphics_renderer.run_updates(update_queues, size_info);
+
+        if result.contains(graphics::UpdateResult::NEED_RESET_ACTIVE_TEX) {
+            self.reset_active_tex();
+        }
     }
 
     /// Draw graphics visible in the display.
     #[inline]
-    pub fn graphics_draw(&mut self, render_list: graphics::RenderList, size_info: &SizeInfo) {
-        self.graphics_renderer.draw(render_list, size_info);
+    pub fn graphics_draw(
+        &mut self,
+        render_list: graphics::RenderList,
+        size_info: &SizeInfo,
+        rects: &mut Vec<RenderRect>,
+        metrics: &Metrics,
+    ) {
+        self.graphics_renderer.draw(render_list, size_info, rects, metrics);
+
+        self.reset_active_tex();
+    }
+
+    /// Reset the cached value of the active texture.
+    pub fn reset_active_tex(&mut self) {
         match &mut self.text_renderer {
-            TextRendererProvider::Gles2(renderer) => renderer.deactivate_tex(),
-            TextRendererProvider::Glsl3(renderer) => renderer.deactivate_tex(),
+            TextRendererProvider::Gles2(renderer) => renderer.reset_active_tex(),
+            TextRendererProvider::Glsl3(renderer) => renderer.reset_active_tex(),
         }
     }
 }
@@ -340,7 +357,7 @@ impl GlExtensions {
     ///
     /// This function will lazily load OpenGL extensions.
     fn contains(extension: &str) -> bool {
-        static OPENGL_EXTENSIONS: OnceCell<HashSet<&'static str, RandomState>> = OnceCell::new();
+        static OPENGL_EXTENSIONS: OnceLock<HashSet<&'static str, RandomState>> = OnceLock::new();
 
         OPENGL_EXTENSIONS.get_or_init(Self::load_extensions).contains(extension)
     }

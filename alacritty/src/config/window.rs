@@ -3,10 +3,10 @@ use std::fmt::{self, Formatter};
 use log::{error, warn};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use winit::window::{Fullscreen, Theme};
 
 #[cfg(target_os = "macos")]
 use winit::platform::macos::OptionAsAlt as WinitOptionAsAlt;
+use winit::window::{Fullscreen, Theme as WinitTheme};
 
 use alacritty_config_derive::{ConfigDeserialize, SerdeReplace};
 
@@ -31,9 +31,6 @@ pub struct WindowConfig {
     #[config(skip)]
     pub embed: Option<u32>,
 
-    /// System decorations theme variant.
-    pub decorations_theme_variant: Option<Theme>,
-
     /// Spread out additional padding evenly.
     pub dynamic_padding: bool,
 
@@ -51,7 +48,6 @@ pub struct WindowConfig {
     pub blur: bool,
 
     /// Controls which `Option` key should be treated as `Alt`.
-    #[cfg(target_os = "macos")]
     option_as_alt: OptionAsAlt,
 
     /// Resize increments.
@@ -65,6 +61,9 @@ pub struct WindowConfig {
 
     /// Initial dimensions.
     dimensions: Dimensions,
+
+    /// System decorations theme variant.
+    decorations_theme_variant: Option<Theme>,
 }
 
 impl Default for WindowConfig {
@@ -83,7 +82,6 @@ impl Default for WindowConfig {
             dynamic_padding: Default::default(),
             resize_increments: Default::default(),
             decorations_theme_variant: Default::default(),
-            #[cfg(target_os = "macos")]
             option_as_alt: Default::default(),
         }
     }
@@ -152,6 +150,10 @@ impl WindowConfig {
             OptionAsAlt::None => WinitOptionAsAlt::None,
         }
     }
+
+    pub fn theme(&self) -> Option<WinitTheme> {
+        self.decorations_theme_variant.map(WinitTheme::from)
+    }
 }
 
 #[derive(ConfigDeserialize, Debug, Clone, PartialEq, Eq)]
@@ -175,7 +177,6 @@ pub enum StartupMode {
     Windowed,
     Maximized,
     Fullscreen,
-    #[cfg(target_os = "macos")]
     SimpleFullscreen,
 }
 
@@ -183,9 +184,7 @@ pub enum StartupMode {
 pub enum Decorations {
     #[default]
     Full,
-    #[cfg(target_os = "macos")]
     Transparent,
-    #[cfg(target_os = "macos")]
     Buttonless,
     None,
 }
@@ -279,7 +278,6 @@ impl<'de> Deserialize<'de> for Class {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[derive(ConfigDeserialize, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionAsAlt {
     /// The left `Option` key is treated as `Alt`.
@@ -294,4 +292,20 @@ pub enum OptionAsAlt {
     /// No special handling is applied for `Option` key.
     #[default]
     None,
+}
+
+/// System decorations theme variant.
+#[derive(ConfigDeserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Light,
+    Dark,
+}
+
+impl From<Theme> for WinitTheme {
+    fn from(theme: Theme) -> Self {
+        match theme {
+            Theme::Light => WinitTheme::Light,
+            Theme::Dark => WinitTheme::Dark,
+        }
+    }
 }

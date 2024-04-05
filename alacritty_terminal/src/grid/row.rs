@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::grid::GridCell;
 use crate::index::Column;
-use crate::term::cell::ResetDiscriminant;
+use crate::term::cell::{Flags, ResetDiscriminant};
 
 /// A row in the grid.
 #[derive(Default, Clone, Debug)]
@@ -83,7 +83,7 @@ impl<T: Clone + Default> Row<T> {
 
         self.occ = min(self.occ, columns);
 
-        if new_row.is_empty() {
+        if new_row.is_empty() || new_row.iter().all(|cell| cell.flags().contains(Flags::GRAPHICS)) {
             None
         } else {
             Some(new_row)
@@ -291,7 +291,7 @@ impl<T> Index<RangeToInclusive<Column>> for Row<T> {
 impl<T> IndexMut<RangeToInclusive<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeToInclusive<Column>) -> &mut [T] {
-        self.occ = max(self.occ, *index.end);
+        self.occ = max(self.occ, *index.end + 1);
         &mut self.inner[..=(index.end.0)]
     }
 }

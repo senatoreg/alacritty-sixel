@@ -9,21 +9,27 @@ use std::collections::BTreeMap;
 use std::mem::{self, MaybeUninit};
 
 use crate::display::content::RenderableCell;
-use crate::gl::{self, types::*};
-use crate::renderer::graphics::{shader, GraphicsRenderer};
 use crate::display::SizeInfo;
+use crate::gl::types::*;
+use crate::gl::{self};
+use crate::renderer::graphics::{shader, GraphicsRenderer};
+use crate::renderer::{RenderRect, Rgb};
 
 use alacritty_terminal::graphics::GraphicId;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::Column;
+
+use crossfont::Metrics;
 
 use log::trace;
 
 /// Position to render each texture in the grid.
 struct RenderPosition {
     column: Column,
-    line: Line,
+    line: usize,
     offset_x: u16,
     offset_y: u16,
+    cell_color: Rgb,
+    show_hint: bool,
 }
 
 /// Track textures to be rendered in the display.
@@ -37,23 +43,27 @@ impl RenderList {
     ///
     /// The graphic is added only the first time it is found in a cell.
     #[inline]
-    pub fn update(&mut self, cell: &RenderableCell) {
-        if let Some(extra) = &cell.extra {
-            if let Some(graphic) = &extra.graphic {
-                let graphic_id = graphic.graphic_id();
-                if self.items.contains_key(&graphic_id) {
-                    return;
-                }
+    pub fn update(&mut self, cell: &RenderableCell, show_hint: bool) {
+        let graphics = match cell.extra.as_ref().and_then(|cell| cell.graphics.as_ref()) {
+            Some(graphics) => graphics,
+            _ => return,
+        };
 
-                let render_item = RenderPosition {
-                    column: cell.point.column,
-                    line: Line(cell.point.line as i32),
-                    offset_x: graphic.offset_x,
-                    offset_y: graphic.offset_y,
-                };
-
-                self.items.insert(graphic_id, render_item);
+        for graphic in graphics {
+            if self.items.contains_key(&graphic.id) {
+                continue;
             }
+
+            let render_item = RenderPosition {
+                column: cell.point.column,
+                line: cell.point.line,
+                offset_x: graphic.offset_x,
+                offset_y: graphic.offset_y,
+                cell_color: cell.fg,
+                show_hint,
+            };
+
+            self.items.insert(graphic.id, render_item);
         }
     }
 
@@ -64,7 +74,13 @@ impl RenderList {
     }
 
     /// Builds a list of vertex for the shader program.
-    pub fn build_vertices(self, renderer: &GraphicsRenderer) -> Vec<shader::Vertex> {
+    fn build_vertices(
+        self,
+        renderer: &GraphicsRenderer,
+        size_info: &SizeInfo,
+        rects: &mut Vec<RenderRect>,
+        line_thickness: f32,
+    ) -> Vec<shader::Vertex> {
         use shader::VertexSide::{BottomLeft, BottomRight, TopLeft, TopRight};
 
         let mut vertices = Vec::new();
@@ -81,7 +97,7 @@ impl RenderList {
                 texture_id: graphic_texture.texture.0,
                 sides: TopLeft,
                 column: render_item.column.0 as GLuint,
-                line: render_item.line.0 as GLuint,
+                line: render_item.line as GLuint,
                 height: graphic_texture.height,
                 width: graphic_texture.width,
                 offset_x: render_item.offset_x,
@@ -94,6 +110,38 @@ impl RenderList {
             for &sides in &[TopRight, BottomLeft, TopRight, BottomRight, BottomLeft] {
                 vertices.push(shader::Vertex { sides, ..vertex });
             }
+
+            if render_item.show_hint {
+                let scale = size_info.cell_height() / graphic_texture.cell_height;
+
+                let x = render_item.column.0 as f32 * size_info.cell_width()
+                    - render_item.offset_x as f32 * scale;
+                let y = render_item.line as f32 * size_info.cell_height()
+                    - render_item.offset_y as f32 * scale;
+
+                let tex_width = graphic_texture.width as f32 * scale;
+                let tex_height = graphic_texture.height as f32 * scale;
+
+                let right = x + tex_width - line_thickness;
+                let bottom = y + tex_height - line_thickness;
+
+                let template = RenderRect {
+                    x,
+                    y,
+                    width: tex_width,
+                    height: line_thickness,
+                    color: render_item.cell_color,
+                    alpha: 1.,
+                    kind: crate::renderer::rects::RectKind::Normal,
+                };
+
+                rects.push(template);
+                rects.push(RenderRect { y: bottom, ..template });
+
+                let template = RenderRect { width: line_thickness, height: tex_height, ..template };
+                rects.push(template);
+                rects.push(RenderRect { x: right, ..template });
+            }
         }
 
         vertices
@@ -101,15 +149,22 @@ impl RenderList {
 
     /// Draw graphics in the display, using the graphics rendering shader
     /// program.
-    pub fn draw(self, renderer: &GraphicsRenderer, size_info: &SizeInfo) {
-        let vertices = self.build_vertices(renderer);
+    pub fn draw(
+        self,
+        renderer: &GraphicsRenderer,
+        size_info: &SizeInfo,
+        rects: &mut Vec<RenderRect>,
+        metrics: &Metrics,
+    ) {
+        let vertices =
+            self.build_vertices(renderer, size_info, rects, metrics.underline_thickness.max(3.0));
 
         // Initialize the rendering program.
         unsafe {
             gl::BindBuffer(gl::ARRAY_BUFFER, renderer.program.vbo);
             gl::BindVertexArray(renderer.program.vao);
 
-            gl::UseProgram(renderer.program.id());
+            gl::UseProgram(renderer.program.shader.id());
 
             gl::Uniform2f(
                 renderer.program.u_cell_dimensions,
@@ -118,8 +173,8 @@ impl RenderList {
             );
             gl::Uniform2f(
                 renderer.program.u_view_dimensions,
-                size_info.width() - 2. * size_info.padding_x(),
-                size_info.height() - 2. * size_info.padding_y(),
+                size_info.width(),
+                size_info.height(),
             );
 
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);

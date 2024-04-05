@@ -2,9 +2,9 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
-use std::marker::Send;
 use std::num::NonZeroUsize;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -66,10 +66,11 @@ where
         pty: T,
         hold: bool,
         ref_test: bool,
-    ) -> EventLoop<T, U> {
+    ) -> io::Result<EventLoop<T, U>> {
         let (tx, rx) = mpsc::channel();
-        EventLoop {
-            poll: polling::Poller::new().expect("create Poll").into(),
+        let poll = polling::Poller::new()?.into();
+        Ok(EventLoop {
+            poll,
             pty,
             tx,
             rx: PeekableReceiver::new(rx),
@@ -77,7 +78,7 @@ where
             event_proxy,
             hold,
             ref_test,
-        }
+        })
     }
 
     pub fn channel(&self) -> EventLoopSender {
@@ -212,8 +213,9 @@ where
             let mut interest = PollingEvent::readable(0);
 
             // Register TTY through EventedRW interface.
-            unsafe {
-                self.pty.register(&self.poll, interest, poll_opts).unwrap();
+            if let Err(err) = unsafe { self.pty.register(&self.poll, interest, poll_opts) } {
+                error!("Event loop registration error: {}", err);
+                return (self, state);
             }
 
             let mut events = Events::with_capacity(NonZeroUsize::new(1024).unwrap());
@@ -234,7 +236,10 @@ where
                 if let Err(err) = self.poll.wait(&mut events, timeout) {
                     match err.kind() {
                         ErrorKind::Interrupted => continue,
-                        _ => panic!("EventLoop polling error: {err:?}"),
+                        _ => {
+                            error!("Event loop polling error: {}", err);
+                            break 'event_loop;
+                        },
                     }
                 }
 
@@ -253,7 +258,11 @@ where
                 for event in events.iter() {
                     match event.key {
                         tty::PTY_CHILD_EVENT_TOKEN => {
-                            if let Some(tty::ChildEvent::Exited) = self.pty.next_child_event() {
+                            if let Some(tty::ChildEvent::Exited(code)) = self.pty.next_child_event()
+                            {
+                                if let Some(code) = code {
+                                    self.event_proxy.send_event(Event::ChildExit(code));
+                                }
                                 if self.hold {
                                     // With hold enabled, make sure the PTY is drained.
                                     let _ = self.pty_read(&mut state, &mut buf, pipe.as_mut());
@@ -261,7 +270,6 @@ where
                                     // Without hold, shutdown the terminal.
                                     self.terminal.lock().exit();
                                 }
-
                                 self.event_proxy.send_event(Event::Wakeup);
                                 break 'event_loop;
                             }
@@ -339,25 +347,53 @@ impl event::Notify for Notifier {
             return;
         }
 
-        self.0.send(Msg::Input(bytes));
+        let _ = self.0.send(Msg::Input(bytes));
     }
 }
 
 impl event::OnResize for Notifier {
     fn on_resize(&mut self, window_size: WindowSize) {
-        self.0.send(Msg::Resize(window_size));
+        let _ = self.0.send(Msg::Resize(window_size));
     }
 }
 
+#[derive(Debug)]
+pub enum EventLoopSendError {
+    /// Error polling the event loop.
+    Io(io::Error),
+
+    /// Error sending a message to the event loop.
+    Send(mpsc::SendError<Msg>),
+}
+
+impl Display for EventLoopSendError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            EventLoopSendError::Io(err) => err.fmt(f),
+            EventLoopSendError::Send(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for EventLoopSendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EventLoopSendError::Io(err) => err.source(),
+            EventLoopSendError::Send(err) => err.source(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct EventLoopSender {
     sender: Sender<Msg>,
     poller: Arc<polling::Poller>,
 }
 
 impl EventLoopSender {
-    pub fn send(&self, msg: Msg) {
-        let _ = self.sender.send(msg);
-        let _ = self.poller.notify();
+    pub fn send(&self, msg: Msg) -> Result<(), EventLoopSendError> {
+        self.sender.send(msg).map_err(EventLoopSendError::Send)?;
+        self.poller.notify().map_err(EventLoopSendError::Io)
     }
 }
 

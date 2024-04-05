@@ -1,14 +1,16 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt::{self, Formatter};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use alacritty_config::SerdeReplace;
 use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::tty::{Options as PtyOptions, Shell};
 use log::{error, warn};
 use serde::de::{Error as SerdeError, MapAccess, Visitor};
-use serde::{self, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer};
 use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, ModifiersState};
 
@@ -165,7 +167,12 @@ impl UiConfig {
     /// Derive [`PtyOptions`] from the config.
     pub fn pty_config(&self) -> PtyOptions {
         let shell = self.shell.clone().map(Into::into);
-        PtyOptions { shell, working_directory: self.working_directory.clone(), hold: false }
+        PtyOptions {
+            shell,
+            working_directory: self.working_directory.clone(),
+            hold: false,
+            env: HashMap::new(),
+        }
     }
 
     /// Generate key bindings for all keyboard hints.
@@ -653,6 +660,14 @@ impl From<Program> for Shell {
             Program::Just(program) => Shell::new(program, Vec::new()),
             Program::WithArgs { program, args } => Shell::new(program, args),
         }
+    }
+}
+
+impl SerdeReplace for Program {
+    fn replace(&mut self, value: toml::Value) -> Result<(), Box<dyn Error>> {
+        *self = Self::deserialize(value)?;
+
+        Ok(())
     }
 }
 

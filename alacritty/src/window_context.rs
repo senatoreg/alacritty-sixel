@@ -223,7 +223,7 @@ impl WindowContext {
             pty,
             pty_config.hold,
             config.debug.ref_test,
-        );
+        )?;
 
         // The event loop channel allows write requests from the event processor
         // to be sent to the pty loop and ultimately written to the pty.
@@ -289,7 +289,7 @@ impl WindowContext {
         }
 
         // Always reload the theme to account for auto-theme switching.
-        self.display.window.set_theme(self.config.window.decorations_theme_variant);
+        self.display.window.set_theme(self.config.window.theme());
 
         // Update display if either padding options or resize increments were changed.
         let window_config = &old_config.window;
@@ -560,6 +560,6 @@ impl WindowContext {
 impl Drop for WindowContext {
     fn drop(&mut self) {
         // Shutdown the terminal's PTY.
-        self.notifier.0.send(Msg::Shutdown);
+        let _ = self.notifier.0.send(Msg::Shutdown);
     }
 }
